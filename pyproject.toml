@@ -9,7 +9,7 @@ description = "Field Reliability Ops CLI for triaging bare-metal node failures."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }
-authors = [{ name = "Alex Alcala", email = "aalcala@coreweave.com" }]
+authors = [{ name = "Adam Alcala", email = "aalcala@coreweave.com" }]
 keywords = ["kubernetes", "bmn", "flcc", "coreweave", "ops"]
 classifiers = [
     "Development Status :: 3 - Alpha",

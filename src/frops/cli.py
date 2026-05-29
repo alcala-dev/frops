@@ -1,8 +1,8 @@
-#!/usr/bin/env python3
 """FROps CLI — helper tool for viewing workflow failure types."""
 
 import argparse
-from modules.commands import run_command, capture_command
+
+from frops.commands import capture_command, run_command
 
 
 FAIL_TYPES = ["fails", "zapfails", "nodezapfails", "dpuzapfails", "testfails", "fielddiagfails"]

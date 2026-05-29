@@ -1,87 +1,86 @@
-"""FROps CLI — helper tool for viewing workflow failure types."""
+"""FROps CLI — argparse setup and subcommand handlers."""
+
+from __future__ import annotations
 
 import argparse
 
+from frops import __version__
+from frops.catalog import (
+    ANALYZE_COMMANDS,
+    FAIL_COMMANDS,
+    FAIL_TYPES,
+    OWNERSHIP_LABEL_TEMPLATE,
+)
 from frops.commands import capture_command, run_command
 
 
-FAIL_TYPES = ["fails", "zapfails", "nodezapfails", "dpuzapfails", "testfails", "fielddiagfails"]
-FAIL_COMMANDS = {
-    "fails": "kubectl get bmns -o wide -l 'flcc.coreweave.com/state=fail'",
-    "zapfails": "kubectl get bmns -o wide -l 'flcc.coreweave.com/state=fail,flcc.coreweave.com/previous-state in (dpu-zap,node-zap)'",
-    "nodezapfails": "kubectl get bmns -o wide -l 'flcc.coreweave.com/state=fail,flcc.coreweave.com/previous-state=node-zap'",
-    "dpuzapfails": "kubectl get bmns -o wide -l 'flcc.coreweave.com/state=fail,flcc.coreweave.com/previous-state=dpu-zap'",
-    "testfails": "kubectl get bmns -o wide -l 'flcc.coreweave.com/state=fail,flcc.coreweave.com/previous-state=test'",
-    "fielddiagfails": "kubectl get bmns -o wide -l 'flcc.coreweave.com/state=fail,flcc.coreweave.com/previous-state=fielddiag'",
-    "unassigned": "ownership.coreweave.com/owner={user}",
-}
-
-# Each analyze target maps to an ordered list of (label, command_template) pairs.
-# Use {name} as a placeholder for the resource name argument.
-ANALYZE_COMMANDS = {
-    "bmn": [
-        ("Overview",       "kubectl get bmns -o wide {name}"),
-        ("Messages",       "kubectl get bmns {name} -o yaml | yq -r '.status.flcc.messages'"),
-        ("AWX Mgmt",       "awxstat -l mgmt {name}"),
-        ("AWX BMC",        "awxstat -l bmc {name}"),
-    ],
-}
-
 def build_command(fail_type: str, user_filter: str | None) -> str:
+    """Return the kubectl command for a fail type, optionally filtered by owner.
+
+    The base command ends with a quoted label selector; the owner filter is
+    spliced in just before the closing quote so the resulting selector stays
+    a single, valid kubectl argument.
+    """
     base = FAIL_COMMANDS[fail_type]
+    if not user_filter:
+        return base
 
-    if user_filter:
-        ownership_label = FAIL_COMMANDS["unassigned"].format(user=user_filter)
-        base = base[:-1] + f",{ownership_label}'"
-    return base
+    ownership_label = OWNERSHIP_LABEL_TEMPLATE.format(user=user_filter)
+    return base[:-1] + f",{ownership_label}'"
 
 
-def handle_view(args):
-    fail_type = args.fail_type
-    user_filter = args.user_filter
-    if fail_type not in FAIL_COMMANDS:
-        print(f"'{fail_type}' is not yet implemented.")
-        return
-
-    cmd = build_command(fail_type, user_filter)
-    label = f" (owner: {user_filter})" if user_filter else ""
-    print(f"Viewing: {fail_type}{label}")
-    print(f"Command: {cmd}\n")
-    run_command(cmd)
-
-def _section(label: str, cmd: str, output: str, rc: int) -> str:
-    """Format a single analyze section with a simple labeled block header."""
+def format_section(label: str, cmd: str, output: str, rc: int) -> str:
+    """Format a single analyze section with a labeled block header."""
     status = f"  [exit {rc}]" if rc != 0 else ""
-    lines = [
-        f"### {label} ###{status}",
-        f"# {cmd}",
-        "",
-        output.rstrip() or "(no output)",
-        "",
-    ]
-    return "\n".join(lines)
+    body = output.rstrip() or "(no output)"
+    return "\n".join([f"### {label} ###{status}", f"# {cmd}", "", body, ""])
 
-def handle_analyze(args):
-    target = args.target
-    name   = args.name
 
-    if target not in ANALYZE_COMMANDS:
-        print(f"'{target}' is not yet implemented for analyze.")
-        return
+def handle_view(args: argparse.Namespace) -> int:
+    cmd = build_command(args.fail_type, args.user_filter)
+    owner_label = f" (owner: {args.user_filter})" if args.user_filter else ""
+    print(f"Viewing: {args.fail_type}{owner_label}")
+    print(f"Command: {cmd}\n")
 
-    steps = ANALYZE_COMMANDS[target]
-    print(f"\n### Analyzing {target}: {name} ###\n")
+    if args.dry_run:
+        return 0
+    return run_command(cmd)
 
+
+def handle_analyze(args: argparse.Namespace) -> int:
+    steps = ANALYZE_COMMANDS[args.target]
+    print(f"\n### Analyzing {args.target}: {args.name} ###\n")
+
+    worst_rc = 0
     for label, template in steps:
-        cmd = template.format(name=name)
+        cmd = template.format(name=args.name)
+        if args.dry_run:
+            print(format_section(label, cmd, "(dry-run, not executed)", 0))
+            continue
         output, rc = capture_command(cmd)
-        print(_section(label, cmd, output, rc))
+        print(format_section(label, cmd, output, rc))
+        worst_rc = max(worst_rc, rc)
+    return worst_rc
+
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="FROps workflow helper CLI tool.")
+    parser = argparse.ArgumentParser(
+        prog="frops",
+        description="FROps workflow helper CLI tool.",
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {__version__}",
+    )
+    parser.add_argument(
+        "-n",
+        "--dry-run",
+        action="store_true",
+        help="Print the commands that would run without executing them.",
+    )
     subparsers = parser.add_subparsers(dest="command", metavar="COMMAND")
 
-    # 'view' subcommand
     view_parser = subparsers.add_parser("view", help="View types of failures.")
     view_parser.add_argument(
         "fail_type",
@@ -101,7 +100,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     view_parser.set_defaults(func=handle_view)
 
-    # 'analyze' subcommand
     analyze_parser = subparsers.add_parser("analyze", help="Analyze a specific resource.")
     analyze_parser.add_argument(
         "target",
@@ -119,16 +117,16 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main():
+def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     if not args.command:
         parser.print_help()
-        return
+        return 0
 
-    args.func(args)
+    return int(args.func(args) or 0)
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

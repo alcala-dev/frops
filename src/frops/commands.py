@@ -1,3 +1,6 @@
+"""Thin wrappers around subprocess for streaming and capturing shell commands."""
+
+from __future__ import annotations
 
 import subprocess
 import sys
@@ -18,6 +21,7 @@ def run_command(command: str) -> int:
     except Exception as exc:
         print(f"Error running command: {exc}", file=sys.stderr)
         return 1
+
 
 def capture_command(command: str) -> tuple[str, int]:
     """

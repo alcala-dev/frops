@@ -8,6 +8,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `frops view sku <SKU> --action` (Phase A, read-only): after the
+  existing display, runs `awxstat -l mgmt|bmc` per BMN with a non-empty
+  `CW-NODE`, parses CW error codes, and prints a per-node remediation
+  plan. Power-drain is planned for `CW0211`/`CW0102` on `GPU-GH200-01`;
+  HO ticket / return-to-triage is planned for `CW0201`. Nothing is
+  executed yet — Phase B will lift the rendered commands behind `--yes`.
+- New modules: `frops.awx` (parser for `awxstat` text output, returns
+  `AWXReport` + `CWError`) and `frops.action` (classifier, `BMNTarget`,
+  `PlannedAction`, plan renderer). Both are pure-functional with full
+  unit coverage so the policy and parsing can be exercised without
+  hitting kubectl/awxstat.
+- `SKU_VIEW_TEMPLATE_JSON` alongside the existing wide-format template,
+  used by `--action` to fetch structured BMN data without affecting the
+  colored human view.
 - `frops view sku <SKU>` subcommand for listing BMNs of a given SKU that
   are not in `production`/`ready`/`rma`/`broken`/`dev`/`debug` state.
   Supports the same `-u <user>` ownership filter as the fail-type views.

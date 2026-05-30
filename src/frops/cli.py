@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import sys
 
 from frops import __version__
 from frops.catalog import (
@@ -10,36 +11,69 @@ from frops.catalog import (
     FAIL_COMMANDS,
     FAIL_TYPES,
     OWNERSHIP_LABEL_TEMPLATE,
+    SKU_VIEW_TEMPLATE,
 )
-from frops.commands import capture_command, run_command
+from frops.commands import run_command
+
+VIEW_TYPES: tuple[str, ...] = (*FAIL_TYPES, "sku")
 
 
-def build_command(fail_type: str, user_filter: str | None) -> str:
-    """Return the kubectl command for a fail type, optionally filtered by owner.
+def _splice_user_filter(base: str, user_filter: str | None) -> str:
+    """Splice an ownership label into a base command's trailing quoted selector.
 
-    The base command ends with a quoted label selector; the owner filter is
-    spliced in just before the closing quote so the resulting selector stays
-    a single, valid kubectl argument.
+    The base command ends with `…'`; the owner filter is inserted just before
+    the closing quote so the resulting selector stays a single, valid kubectl
+    argument.
     """
-    base = FAIL_COMMANDS[fail_type]
     if not user_filter:
         return base
-
     ownership_label = OWNERSHIP_LABEL_TEMPLATE.format(user=user_filter)
     return base[:-1] + f",{ownership_label}'"
 
 
+def build_command(fail_type: str, user_filter: str | None) -> str:
+    """Return the kubectl command for a fail type, optionally filtered by owner."""
+    return _splice_user_filter(FAIL_COMMANDS[fail_type], user_filter)
+
+
+def build_sku_command(sku: str, user_filter: str | None) -> str:
+    """Return the kubectl command for a SKU view, optionally filtered by owner."""
+    return _splice_user_filter(SKU_VIEW_TEMPLATE.format(sku=sku), user_filter)
+
+
 def format_section(label: str, cmd: str, output: str, rc: int) -> str:
-    """Format a single analyze section with a labeled block header."""
+    """Format a single analyze section with a labeled block header.
+
+    Only used on the dry-run path; live runs stream the command's own output
+    (preserving colors emitted by kubectl/kubecolor and friends).
+    """
     status = f"  [exit {rc}]" if rc != 0 else ""
     body = output.rstrip() or "(no output)"
     return "\n".join([f"### {label} ###{status}", f"# {cmd}", "", body, ""])
 
 
 def handle_view(args: argparse.Namespace) -> int:
-    cmd = build_command(args.fail_type, args.user_filter)
+    if args.fail_type == "sku":
+        if not args.sku_value:
+            print(
+                "error: 'view sku' requires a SKU argument (e.g. GPU-GH200-01)",
+                file=sys.stderr,
+            )
+            return 2
+        cmd = build_sku_command(args.sku_value, args.user_filter)
+        subject = f"sku={args.sku_value}"
+    else:
+        if args.sku_value:
+            print(
+                f"error: 'view {args.fail_type}' takes no extra positional argument",
+                file=sys.stderr,
+            )
+            return 2
+        cmd = build_command(args.fail_type, args.user_filter)
+        subject = args.fail_type
+
     owner_label = f" (owner: {args.user_filter})" if args.user_filter else ""
-    print(f"Viewing: {args.fail_type}{owner_label}")
+    print(f"Viewing: {subject}{owner_label}")
     print(f"Command: {cmd}\n")
 
     if args.dry_run:
@@ -57,8 +91,15 @@ def handle_analyze(args: argparse.Namespace) -> int:
         if args.dry_run:
             print(format_section(label, cmd, "(dry-run, not executed)", 0))
             continue
-        output, rc = capture_command(cmd)
-        print(format_section(label, cmd, output, rc))
+        # Stream the command's output directly so terminal colors emitted by
+        # kubectl/kubecolor/yq are preserved end-to-end. Capturing would force
+        # the tools into non-TTY mode and strip ANSI codes.
+        print(f"### {label} ###")
+        print(f"# {cmd}")
+        rc = run_command(cmd)
+        if rc != 0:
+            print(f"[exit {rc}]")
+        print()
         worst_rc = max(worst_rc, rc)
     return worst_rc
 
@@ -84,9 +125,19 @@ def build_parser() -> argparse.ArgumentParser:
     view_parser = subparsers.add_parser("view", help="View types of failures.")
     view_parser.add_argument(
         "fail_type",
-        choices=FAIL_TYPES,
+        choices=VIEW_TYPES,
         metavar="TYPE",
-        help=f"Failure type to view. One of: {', '.join(FAIL_TYPES)}",
+        help=(
+            f"View type. Failure types: {', '.join(FAIL_TYPES)}. "
+            "Use 'sku' for SKU-based filtering (requires a SKU value)."
+        ),
+    )
+    view_parser.add_argument(
+        "sku_value",
+        nargs="?",
+        default=None,
+        metavar="SKU",
+        help="SKU value, required when TYPE is 'sku' (e.g. GPU-GH200-01).",
     )
     view_parser.add_argument(
         "-u",

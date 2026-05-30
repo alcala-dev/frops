@@ -7,6 +7,8 @@ from frops.catalog import (
     FAIL_COMMANDS,
     FAIL_TYPES,
     OWNERSHIP_LABEL_TEMPLATE,
+    SKU_EXCLUDED_STATES,
+    SKU_VIEW_TEMPLATE,
 )
 
 
@@ -31,3 +33,15 @@ def test_analyze_templates_render_with_name() -> None:
         for label, template in steps:
             rendered = template.format(name="ss929610x4724071")
             assert "ss929610x4724071" in rendered, f"{target}/{label} dropped the name placeholder"
+
+
+def test_sku_template_ends_with_single_quote() -> None:
+    # _splice_user_filter assumes a trailing-quoted selector.
+    assert SKU_VIEW_TEMPLATE.endswith("'")
+
+
+def test_sku_template_renders_excluded_states_in_order() -> None:
+    rendered = SKU_VIEW_TEMPLATE.format(sku="GPU-GH200-01")
+    expected_states = ",".join(SKU_EXCLUDED_STATES)
+    assert f"notin ({expected_states})" in rendered
+    assert "ds.coreweave.com/sku.cw-sku=GPU-GH200-01" in rendered

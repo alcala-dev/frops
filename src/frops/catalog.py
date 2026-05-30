@@ -29,6 +29,24 @@ FAIL_COMMANDS: Final[dict[str, str]] = {
 
 OWNERSHIP_LABEL_TEMPLATE: Final[str] = "ownership.coreweave.com/owner={user}"
 
+# States that a 'view sku' query excludes — i.e. we only want to see nodes
+# that are *not* healthy/operating-as-intended for the requested SKU.
+SKU_EXCLUDED_STATES: Final[tuple[str, ...]] = (
+    "production",
+    "ready",
+    "rma",
+    "broken",
+    "dev",
+    "debug",
+)
+
+_SKU_EXCLUDED_RENDERED = ",".join(SKU_EXCLUDED_STATES)
+SKU_VIEW_TEMPLATE: Final[str] = (
+    "kubectl get bmns -o wide -l "
+    "'ds.coreweave.com/sku.cw-sku={sku},"
+    f"flcc.coreweave.com/state notin ({_SKU_EXCLUDED_RENDERED})'"
+)
+
 # Each analyze target maps to an ordered list of (label, command_template).
 # Use {name} as the placeholder for the resource-name argument.
 ANALYZE_COMMANDS: Final[dict[str, list[tuple[str, str]]]] = {

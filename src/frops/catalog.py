@@ -47,6 +47,14 @@ SKU_VIEW_TEMPLATE: Final[str] = (
     f"flcc.coreweave.com/state notin ({_SKU_EXCLUDED_RENDERED})'"
 )
 
+# Same selector, JSON output. Used by '--action' to fetch structured BMN
+# data (CW-NODE, labels) alongside the colored human display.
+SKU_VIEW_TEMPLATE_JSON: Final[str] = (
+    "kubectl get bmns -o json -l "
+    "'ds.coreweave.com/sku.cw-sku={sku},"
+    f"flcc.coreweave.com/state notin ({_SKU_EXCLUDED_RENDERED})'"
+)
+
 # Each analyze target maps to an ordered list of (label, command_template).
 # Use {name} as the placeholder for the resource-name argument.
 ANALYZE_COMMANDS: Final[dict[str, list[tuple[str, str]]]] = {

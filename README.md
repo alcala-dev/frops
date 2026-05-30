@@ -79,6 +79,39 @@ The excluded states are `production`, `ready`, `rma`, `broken`, `dev`,
 `debug`. To adjust the list, edit `SKU_EXCLUDED_STATES` in
 [`src/frops/catalog.py`](src/frops/catalog.py).
 
+### Plan remediation actions for a SKU
+
+`frops view sku <SKU> --action` shows the existing colored table, then
+inspects each returned BMN's AWX jobs and prints a per-node remediation
+plan. **Phase A is read-only** — it prints the `cwctl` commands and JIRA
+lookups that *would* run, but executes nothing. Execution is coming in a
+follow-up behind an explicit `--yes`.
+
+```bash
+frops view sku GPU-GH200-01 --action
+```
+
+What `--action` does, per BMN with a non-empty `CW-NODE`:
+
+1. Captures `awxstat -l mgmt <BMN>` and `awxstat -l bmc <BMN>`.
+2. Parses each output's `cw_error_codes={…}` block for `CWXXXX` codes.
+3. Classifies the BMN:
+   - **`CW0211` or `CW0102` on SKU `GPU-GH200-01`** → power-drain via
+     `cwctl flcc node --one-off -w orphan -s power-drain …`
+   - **`CW0201`** → search JIRA for an HO ticket in "Awaiting Support"
+     (Phase B); fall back to `cwctl flcc node -w return-to-triage …`
+     if none exists.
+   - Other / no codes → no-op.
+4. Prints a grouped plan with the exact commands that would run and a
+   totals line.
+
+BMNs without a `CW-NODE` are listed as skipped — there's nothing to
+action on a node that hasn't joined a cluster.
+
+The policy lives in [`src/frops/action.py`](src/frops/action.py) and the
+AWX parser in [`src/frops/awx.py`](src/frops/awx.py); see those modules
+to add new CW-code mappings or extend the eligible SKU list.
+
 ### Analyze a specific BMN
 
 ```bash

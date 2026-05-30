@@ -67,6 +67,28 @@ To add a new entry to `frops view`:
 After changing either, update `tests/test_catalog.py` accordingly and add
 a CHANGELOG entry.
 
+## Extending the `--action` policy
+
+The classification policy lives in
+[`src/frops/action.py`](src/frops/action.py) as three frozensets:
+
+- `POWER_DRAIN_CODES` — CW codes that trigger a `cwctl power-drain`
+- `POWER_DRAIN_ELIGIBLE_SKUS` — SKUs allowed to receive power-drain
+- `HO_TICKET_CODES` — CW codes that route to JIRA HO ticket logic
+
+To add a new mapping:
+
+1. Add the code to the right frozenset (or add a SKU to
+   `POWER_DRAIN_ELIGIBLE_SKUS`).
+2. Add a unit test in `tests/test_action.py` covering the new case — both
+   the positive path and the SKU-not-eligible path if applicable.
+3. Update the README's "Plan remediation actions" section.
+4. Add a CHANGELOG entry.
+
+If you need a brand-new `ActionKind`, that's a bigger change: add the
+enum variant, render it in `render_plan`, and (for Phase B+) wire it
+into the executor.
+
 ## Adding an analyze target
 
 To add a new target to `frops analyze`:

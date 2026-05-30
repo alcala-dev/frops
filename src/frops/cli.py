@@ -3,17 +3,22 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
+from typing import Any
 
 from frops import __version__
+from frops.action import BMNTarget, classify, render_plan
+from frops.awx import AWXReport, parse_awxstat
 from frops.catalog import (
     ANALYZE_COMMANDS,
     FAIL_COMMANDS,
     FAIL_TYPES,
     OWNERSHIP_LABEL_TEMPLATE,
     SKU_VIEW_TEMPLATE,
+    SKU_VIEW_TEMPLATE_JSON,
 )
-from frops.commands import run_command
+from frops.commands import capture_command, run_command
 
 VIEW_TYPES: tuple[str, ...] = (*FAIL_TYPES, "sku")
 
@@ -39,6 +44,15 @@ def build_command(fail_type: str, user_filter: str | None) -> str:
 def build_sku_command(sku: str, user_filter: str | None) -> str:
     """Return the kubectl command for a SKU view, optionally filtered by owner."""
     return _splice_user_filter(SKU_VIEW_TEMPLATE.format(sku=sku), user_filter)
+
+
+def build_sku_command_json(sku: str, user_filter: str | None) -> str:
+    """Return the JSON-output variant of the SKU view command.
+
+    Used by `--action` to get structured BMN data (CW-NODE, labels) without
+    affecting the human-facing colored output of the wide view.
+    """
+    return _splice_user_filter(SKU_VIEW_TEMPLATE_JSON.format(sku=sku), user_filter)
 
 
 def format_section(label: str, cmd: str, output: str, rc: int) -> str:
@@ -69,6 +83,12 @@ def handle_view(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 2
+        if getattr(args, "action", False):
+            print(
+                "error: --action is only supported with 'view sku' in Phase A",
+                file=sys.stderr,
+            )
+            return 2
         cmd = build_command(args.fail_type, args.user_filter)
         subject = args.fail_type
 
@@ -77,8 +97,114 @@ def handle_view(args: argparse.Namespace) -> int:
     print(f"Command: {cmd}\n")
 
     if args.dry_run:
+        if getattr(args, "action", False):
+            print("(--action would also fetch JSON BMN data + per-BMN awxstat output)")
         return 0
-    return run_command(cmd)
+
+    view_rc = run_command(cmd)
+    if not getattr(args, "action", False):
+        return view_rc
+
+    plan_rc = _run_sku_action_plan(args.sku_value, args.user_filter)
+    return max(view_rc, plan_rc)
+
+
+def _run_sku_action_plan(sku: str, user_filter: str | None) -> int:
+    """Phase A: fetch BMN JSON + awxstat output, classify, print a plan.
+
+    Returns a non-zero exit only on hard failures (kubectl JSON fetch fails,
+    JSON parse fails). Per-BMN awxstat failures are logged and skipped — the
+    BMN is excluded from the plan rather than aborting the whole pass.
+    """
+    json_cmd = build_sku_command_json(sku, user_filter)
+    raw, rc = capture_command(json_cmd)
+    if rc != 0:
+        print(
+            f"error: failed to fetch BMN JSON (exit {rc}):\n{raw}",
+            file=sys.stderr,
+        )
+        return rc
+
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        print(f"error: failed to parse kubectl JSON output: {exc}", file=sys.stderr)
+        return 1
+
+    items = data.get("items", [])
+    if not items:
+        print("\n=== Planned actions ===\n\n(no BMNs returned by the SKU query)")
+        return 0
+
+    targets, skipped = _build_targets(items, sku)
+
+    if skipped:
+        print(f"\n(skipped {len(skipped)} BMN(s) with empty CW-NODE: {', '.join(skipped)})")
+
+    actions = [classify(target) for target in targets]
+    print()
+    print(render_plan(actions))
+    print("\nnote: Phase A is read-only. No cwctl/JIRA actions were executed.")
+    return 0
+
+
+def _build_targets(
+    items: list[dict[str, Any]], default_sku: str
+) -> tuple[list[BMNTarget], list[str]]:
+    """Build BMNTargets from raw kubectl JSON `items`.
+
+    Returns `(targets, skipped_bmn_names)`. A BMN is "skipped" when it has
+    no CW-NODE (i.e. `.status.reportedNodeInfo.nodeName` is empty) — those
+    can't be actioned even if AWX shows failures, per the spec.
+    """
+    targets: list[BMNTarget] = []
+    skipped: list[str] = []
+
+    for item in items:
+        metadata = item.get("metadata") or {}
+        status = item.get("status") or {}
+        bmn_name = metadata.get("name") or ""
+        reported_node = (status.get("reportedNodeInfo") or {}).get("nodeName") or ""
+
+        if not bmn_name:
+            continue
+        if not reported_node:
+            skipped.append(bmn_name)
+            continue
+
+        labels = metadata.get("labels") or {}
+        sku = labels.get("ds.coreweave.com/sku.cw-sku", default_sku)
+
+        reports = _collect_awx_reports(bmn_name)
+        targets.append(
+            BMNTarget(
+                bmn=bmn_name,
+                cw_node=reported_node,
+                sku=sku,
+                awx_reports=tuple(reports),
+            )
+        )
+
+    return targets, skipped
+
+
+def _collect_awx_reports(bmn: str) -> list[AWXReport]:
+    """Run awxstat -l mgmt|bmc against a BMN and parse the output.
+
+    Failures (awxstat unavailable, non-zero exit) are logged to stderr and
+    the limit type is skipped. Phase A continues with whatever it got.
+    """
+    reports: list[AWXReport] = []
+    for limit_type in ("mgmt", "bmc"):
+        text, rc = capture_command(f"awxstat -l {limit_type} {bmn}")
+        if rc != 0:
+            print(
+                f"warning: awxstat -l {limit_type} {bmn} failed (exit {rc}); skipping this limit",
+                file=sys.stderr,
+            )
+            continue
+        reports.append(parse_awxstat(text))
+    return reports
 
 
 def handle_analyze(args: argparse.Namespace) -> int:
@@ -147,6 +273,15 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Filter results by ownership label. "
             "Pass 'unassigned' or a specific username, e.g. -u jdoe"
+        ),
+    )
+    view_parser.add_argument(
+        "--action",
+        action="store_true",
+        help=(
+            "After displaying results, inspect AWX jobs per BMN, "
+            "classify by CW codes, and print an action plan. "
+            "Read-only in Phase A; execution lands in a follow-up."
         ),
     )
     view_parser.set_defaults(func=handle_view)

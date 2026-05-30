@@ -13,8 +13,13 @@ nodes in various FLCC failure states without remembering long label selectors.
 
 - `frops view <fail_type>` — list BMNs in a given failure state (zap, test,
   field-diag, etc.), optionally filtered by ownership label.
+- `frops view sku <SKU>` — list BMNs of a given SKU that need attention
+  (i.e. *not* in `production`/`ready`/`rma`/`broken`/`dev`/`debug` state).
 - `frops analyze bmn <name>` — run an ordered set of inspection commands
   against a specific BMN and print labeled output sections.
+
+Terminal colors emitted by `kubectl` / `kubecolor` / `yq` are preserved
+end-to-end — `frops` streams command output rather than capturing it.
 
 ## Requirements
 
@@ -59,6 +64,20 @@ frops view testfails -u jdoe
 
 Available fail types: `fails`, `zapfails`, `nodezapfails`, `dpuzapfails`,
 `testfails`, `fielddiagfails`.
+
+### View nodes by SKU
+
+```bash
+# All GH200 nodes that aren't in production/ready/rma/broken/dev/debug
+frops view sku GPU-GH200-01
+
+# Same query, scoped to one owner
+frops view sku GPU-GH200-01 -u jdoe
+```
+
+The excluded states are `production`, `ready`, `rma`, `broken`, `dev`,
+`debug`. To adjust the list, edit `SKU_EXCLUDED_STATES` in
+[`src/frops/catalog.py`](src/frops/catalog.py).
 
 ### Analyze a specific BMN
 

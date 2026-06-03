@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from frops.action import (
     ActionKind,
     BMNTarget,
@@ -12,7 +14,9 @@ from frops.action import (
     classify,
     execute_plan,
     render_execution_summary,
+    render_jira_block,
     render_plan,
+    resolve_ho_tickets,
 )
 from frops.awx import AWXReport, CWError
 
@@ -259,3 +263,238 @@ def test_render_execution_summary_lists_failures_only() -> None:
     assert "command: cwctl bad" in rendered
     # Successful BMN shouldn't be listed individually.
     assert "  - ok " not in rendered
+
+
+# --------------------------- HO ticket resolution ---------------------------
+
+
+def _ho_action(
+    *, bmn: str = "ss900770x4200980", cw_node: str = "g81b512", sku: str = "GPU-GH200-01"
+) -> PlannedAction:
+    """An HO_TICKET PlannedAction with the cwctl fallback command set."""
+    return PlannedAction(
+        bmn=bmn,
+        cw_node=cw_node,
+        sku=sku,
+        kind=ActionKind.HO_TICKET,
+        triggering_codes=("CW0201",),
+        command=f"cwctl flcc node -w return-to-triage {bmn} -o -m '...'",
+        notes="fallback",
+    )
+
+
+def _ho_target(
+    *,
+    bmn: str = "ss900770x4200980",
+    cw_node: str = "g81b512",
+    sku: str = "GPU-GH200-01",
+    serial: str = "S900770X4200980",
+) -> BMNTarget:
+    return BMNTarget(bmn=bmn, cw_node=cw_node, sku=sku, awx_reports=(), serial=serial)
+
+
+def test_bmn_target_search_identifiers_dedups_and_skips_empty() -> None:
+    t = _ho_target()
+    assert t.search_identifiers == ("ss900770x4200980", "g81b512", "S900770X4200980")
+    # When serial is empty, drops it. When bmn equals cw_node, dedups.
+    t2 = BMNTarget(bmn="x", cw_node="x", sku="s", awx_reports=(), serial="")
+    assert t2.search_identifiers == ("x",)
+
+
+def test_resolve_ho_tickets_replaces_command_with_jira_issue_on_match() -> None:
+    action = _ho_action()
+    target = _ho_target()
+    seen: list[tuple[str, ...]] = []
+
+    def _search(ids: tuple[str, ...]) -> str | None:
+        seen.append(ids)
+        return "HO-12345"
+
+    resolved = resolve_ho_tickets([action], _search, {action.bmn: target})
+    assert seen == [target.search_identifiers]
+    (got,) = resolved
+    assert got.jira_issue == "HO-12345"
+    assert got.command is None
+    assert got.kind is ActionKind.HO_TICKET
+    assert "HO-12345" in got.notes
+
+
+def test_resolve_ho_tickets_keeps_cwctl_fallback_when_no_match() -> None:
+    action = _ho_action()
+    target = _ho_target()
+    resolved = resolve_ho_tickets([action], lambda _ids: None, {action.bmn: target})
+    (got,) = resolved
+    assert got.jira_issue is None
+    assert got.command == action.command  # unchanged
+    assert got.notes == action.notes
+
+
+def test_resolve_ho_tickets_leaves_non_ho_actions_alone() -> None:
+    power = _action(bmn="pd", command="cwctl pd", kind=ActionKind.POWER_DRAIN)
+    ho = _ho_action(bmn="ho")
+    noop = _action(bmn="np", command=None, kind=ActionKind.NOOP)
+
+    def _search(_ids: tuple[str, ...]) -> str | None:
+        return "HO-9"
+
+    resolved = resolve_ho_tickets(
+        [power, ho, noop],
+        _search,
+        {"ho": _ho_target(bmn="ho")},
+    )
+    # Power-drain and noop are untouched; only HO action is resolved.
+    assert resolved[0] is power
+    assert resolved[1].jira_issue == "HO-9"
+    assert resolved[2] is noop
+
+
+def test_resolve_ho_tickets_falls_back_to_bmn_when_target_missing() -> None:
+    action = _ho_action()
+    seen: list[tuple[str, ...]] = []
+
+    def _search(ids: tuple[str, ...]) -> str | None:
+        seen.append(ids)
+        return None
+
+    # No matching target in the map — should use (bmn,) so we still search.
+    resolve_ho_tickets([action], _search, {})
+    assert seen == [(action.bmn,)]
+
+
+# --------------------------- actionable_actions w/ JIRA ---------------------
+
+
+def test_actionable_actions_includes_jira_resolved_actions() -> None:
+    shell_action = _action(bmn="sh", command="cwctl x")
+    jira_action = PlannedAction(
+        bmn="ji",
+        cw_node="g1",
+        sku="s",
+        kind=ActionKind.HO_TICKET,
+        triggering_codes=("CW0201",),
+        command=None,
+        notes="",
+        jira_issue="HO-42",
+    )
+    noop_action = _action(bmn="np", command=None, kind=ActionKind.NOOP)
+    result = actionable_actions([shell_action, jira_action, noop_action])
+    assert [a.bmn for a in result] == ["sh", "ji"]
+
+
+# --------------------------- execute_plan JIRA dispatch ---------------------
+
+
+def test_execute_plan_routes_jira_actions_to_jira_runner() -> None:
+    shell_action = _action(bmn="sh", command="cwctl x")
+    jira_action = PlannedAction(
+        bmn="ji",
+        cw_node="g1",
+        sku="s",
+        kind=ActionKind.HO_TICKET,
+        triggering_codes=("CW0201",),
+        command=None,
+        notes="",
+        jira_issue="HO-42",
+    )
+    shell_calls: list[str] = []
+    jira_calls: list[PlannedAction] = []
+
+    summary = execute_plan(
+        [shell_action, jira_action],
+        runner=lambda cmd: shell_calls.append(cmd) or 0,  # type: ignore[func-returns-value]
+        jira_runner=lambda act: jira_calls.append(act) or 0,  # type: ignore[func-returns-value]
+    )
+    assert shell_calls == ["cwctl x"]
+    assert [a.bmn for a in jira_calls] == ["ji"]
+    assert summary.worst_rc == 0
+
+
+def test_execute_plan_raises_when_jira_action_has_no_jira_runner() -> None:
+    jira_action = PlannedAction(
+        bmn="ji",
+        cw_node="g1",
+        sku="s",
+        kind=ActionKind.HO_TICKET,
+        triggering_codes=("CW0201",),
+        command=None,
+        notes="",
+        jira_issue="HO-42",
+    )
+    with pytest.raises(ValueError, match="no jira_runner"):
+        execute_plan([jira_action], lambda _cmd: 0, jira_runner=None)
+
+
+def test_execute_plan_jira_failure_propagates_via_worst_rc() -> None:
+    jira_action = PlannedAction(
+        bmn="ji",
+        cw_node="g1",
+        sku="s",
+        kind=ActionKind.HO_TICKET,
+        triggering_codes=("CW0201",),
+        command=None,
+        notes="",
+        jira_issue="HO-42",
+    )
+    summary = execute_plan([jira_action], lambda _cmd: 0, jira_runner=lambda _act: 3)
+    assert summary.worst_rc == 3
+    assert [a.bmn for a in (r.action for r in summary.failed)] == ["ji"]
+
+
+# --------------------------- render_plan & jira_block -----------------------
+
+
+def test_render_plan_shows_jira_target_instead_of_command_when_resolved() -> None:
+    jira_action = PlannedAction(
+        bmn="ji",
+        cw_node="g1",
+        sku="GPU-GH200-01",
+        kind=ActionKind.HO_TICKET,
+        triggering_codes=("CW0201",),
+        command=None,
+        notes="found ticket",
+        jira_issue="HO-77",
+    )
+    rendered = render_plan([jira_action])
+    assert "jira: append to HO-77 description" in rendered
+    # The cwctl line for HO_TICKET should not be rendered when resolved.
+    assert "command:" not in rendered
+
+
+def test_render_jira_block_contains_expected_fields() -> None:
+    action = PlannedAction(
+        bmn="ss900770x4200980",
+        cw_node="g81b512",
+        sku="GPU-GH200-01",
+        kind=ActionKind.HO_TICKET,
+        triggering_codes=("CW0201", "CW0204"),
+        command=None,
+        notes="found ticket HO-77",
+        jira_issue="HO-77",
+    )
+    block = render_jira_block(action, "2026-06-02T18:42:00Z")
+    assert "2026-06-02T18:42:00Z" in block
+    assert "ss900770x4200980" in block
+    assert "g81b512" in block
+    assert "GPU-GH200-01" in block
+    assert "CW0201, CW0204" in block
+    assert "found ticket HO-77" in block
+
+
+def test_render_execution_summary_shows_jira_target_on_failure() -> None:
+    jira_action = PlannedAction(
+        bmn="ji",
+        cw_node="g1",
+        sku="s",
+        kind=ActionKind.HO_TICKET,
+        triggering_codes=("CW0201",),
+        command=None,
+        notes="",
+        jira_issue="HO-42",
+    )
+    summary = ExecutionSummary(
+        results=(ExecutionResult(action=jira_action, rc=1),),
+    )
+    rendered = render_execution_summary(summary)
+    assert "exit 1" in rendered
+    assert "append to HO-42" in rendered
+    assert "command:" not in rendered

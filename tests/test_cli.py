@@ -523,6 +523,172 @@ def test_main_yes_without_action_is_rejected(
     assert "--yes requires --action" in err
 
 
+# ----------------------------- view sku --action JIRA HO-ticket -------------
+
+
+_HO_BMN_JSON = json.dumps(
+    {
+        "items": [
+            {
+                "metadata": {
+                    "name": "ss900770x4200980",
+                    "labels": {
+                        "ds.coreweave.com/sku.cw-sku": "GPU-GH200-01",
+                        "ds.coreweave.com/status.asset.serial": "S900770X4200980",
+                    },
+                },
+                "status": {"reportedNodeInfo": {"nodeName": "g81b512"}},
+            }
+        ]
+    }
+)
+
+
+def _awx_with_ho_code() -> str:
+    return (
+        "Node:       S900770X4200980\n"
+        "Job Status: failed\n\n"
+        "cw_error_codes={\n"
+        "  CW0201: hardware fault\n"
+        "}\n"
+    )
+
+
+def test_main_view_sku_action_resolves_ho_ticket_when_jira_creds_present(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("JIRA_EMAIL", "me@x.com")
+    monkeypatch.setenv("JIRA_TOKEN", "tok")
+
+    captures = _fake_capture_for_action(
+        awx_outputs={
+            ("mgmt", "ss900770x4200980"): (_awx_with_ho_code(), 0),
+            ("bmc", "ss900770x4200980"): ("cw_error_codes={}\n", 0),
+        },
+        json_output=(_HO_BMN_JSON, 0),
+    )
+    monkeypatch.setattr("frops.cli.capture_command", captures)
+
+    run_calls: list[str] = []
+    monkeypatch.setattr(
+        "frops.cli.run_command",
+        lambda cmd: run_calls.append(cmd) or 0,  # type: ignore[func-returns-value]
+    )
+
+    # Stub the JIRA client: search returns one issue; append succeeds.
+    search_args: list[str] = []
+    update_calls: list[tuple[str, str]] = []
+
+    class _FakeJIRA:
+        def __init__(self) -> None:
+            pass
+
+        def search(self, jql: str) -> list[object]:
+            search_args.append(jql)
+            from frops.jira import JIRAIssue
+
+            return [JIRAIssue(key="HO-12345", summary="...", status="Awaiting Support")]
+
+        def append_to_description(self, key: str, block: str) -> None:
+            update_calls.append((key, block))
+
+    monkeypatch.setattr("frops.cli.JIRAClient", _FakeJIRA)
+
+    rc = main(["view", "sku", "GPU-GH200-01", "--action", "--yes"])
+    out = capsys.readouterr().out
+    assert rc == 0
+
+    # JQL contains every identifier we can match HO summaries with.
+    assert len(search_args) == 1
+    for ident in ("ss900770x4200980", "g81b512", "S900770X4200980"):
+        assert ident in search_args[0]
+
+    # The plan should mention the resolved ticket, not the cwctl fallback.
+    assert "append to HO-12345 description" in out
+    assert "return-to-triage ss900770x4200980" not in out
+
+    # Execution went through append_to_description, NOT run_command.
+    assert update_calls and update_calls[0][0] == "HO-12345"
+    assert "ss900770x4200980" in update_calls[0][1]
+    assert "CW0201" in update_calls[0][1]
+    # The only run_command call should be the initial kubectl wide view.
+    assert len(run_calls) == 1
+    assert "kubectl" in run_calls[0]
+
+
+def test_main_view_sku_action_falls_back_to_cwctl_when_no_jira_match(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("JIRA_EMAIL", "me@x.com")
+    monkeypatch.setenv("JIRA_TOKEN", "tok")
+
+    captures = _fake_capture_for_action(
+        awx_outputs={
+            ("mgmt", "ss900770x4200980"): (_awx_with_ho_code(), 0),
+            ("bmc", "ss900770x4200980"): ("cw_error_codes={}\n", 0),
+        },
+        json_output=(_HO_BMN_JSON, 0),
+    )
+    monkeypatch.setattr("frops.cli.capture_command", captures)
+    run_calls: list[str] = []
+    monkeypatch.setattr(
+        "frops.cli.run_command",
+        lambda cmd: run_calls.append(cmd) or 0,  # type: ignore[func-returns-value]
+    )
+
+    class _FakeJIRA:
+        def __init__(self) -> None:
+            pass
+
+        def search(self, _jql: str) -> list[object]:
+            return []  # no matches
+
+        def append_to_description(self, _key: str, _block: str) -> None:
+            raise AssertionError("should not be called when no match")
+
+    monkeypatch.setattr("frops.cli.JIRAClient", _FakeJIRA)
+
+    rc = main(["view", "sku", "GPU-GH200-01", "--action", "--yes"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    # Plan and execution both use the cwctl return-to-triage fallback.
+    assert "return-to-triage" in out
+    assert any("return-to-triage ss900770x4200980" in c for c in run_calls)
+
+
+def test_main_view_sku_action_continues_without_jira_when_creds_missing(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("JIRA_EMAIL", raising=False)
+    monkeypatch.delenv("JIRA_TOKEN", raising=False)
+
+    captures = _fake_capture_for_action(
+        awx_outputs={
+            ("mgmt", "ss900770x4200980"): (_awx_with_ho_code(), 0),
+            ("bmc", "ss900770x4200980"): ("cw_error_codes={}\n", 0),
+        },
+        json_output=(_HO_BMN_JSON, 0),
+    )
+    monkeypatch.setattr("frops.cli.capture_command", captures)
+    run_calls: list[str] = []
+    monkeypatch.setattr(
+        "frops.cli.run_command",
+        lambda cmd: run_calls.append(cmd) or 0,  # type: ignore[func-returns-value]
+    )
+
+    rc = main(["view", "sku", "GPU-GH200-01", "--action", "--yes"])
+    captured = capsys.readouterr()
+    assert rc == 0
+    # User sees a one-line note explaining JIRA was skipped.
+    assert "JIRA lookup disabled" in captured.err
+    # Falls back to cwctl execution path.
+    assert "return-to-triage" in captured.out
+    assert any("return-to-triage ss900770x4200980" in c for c in run_calls)
+
+
 def test_main_view_sku_action_yes_dry_run_mentions_execute_intent(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,

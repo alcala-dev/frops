@@ -105,8 +105,11 @@ What `--action` does, per BMN with a non-empty `CW-NODE`:
 3. Classifies the BMN:
    - **`CW0211` or `CW0102` on SKU `GPU-GH200-01`** → power-drain via
      `cwctl flcc node --one-off -w orphan -s power-drain …`
-   - **`CW0201`** → search JIRA for an HO ticket in "Awaiting Support"
-     (later phase); for now, falls back to
+   - **`CW0201`** → search the `HO` JIRA project for an open ticket in
+     `Awaiting Support` whose summary mentions the BMN name, CW-NODE
+     (gmac), or hardware serial. If found, the action becomes "append a
+     status block to that ticket's Description". If nothing matches (or
+     JIRA creds aren't set), falls back to
      `cwctl flcc node -w return-to-triage …`.
    - Other / no codes → no-op.
 4. Prints a grouped plan with the exact commands that would run and a
@@ -119,6 +122,22 @@ What `--action` does, per BMN with a non-empty `CW-NODE`:
 
 BMNs without a `CW-NODE` are listed as skipped — there's nothing to
 action on a node that hasn't joined a cluster.
+
+#### JIRA HO-ticket auth
+
+The HO-ticket resolver authenticates to JIRA Cloud via HTTP Basic with
+your Atlassian account email and an API token:
+
+```bash
+export JIRA_EMAIL=you@coreweave.com
+export JIRA_TOKEN=<your-api-token>
+```
+
+Generate a token at
+<https://id.atlassian.com/manage-profile/security/api-tokens>. If either
+var is unset, `--action` still runs — it just skips the HO lookup and
+falls back to `cwctl return-to-triage` for `CW0201` BMNs (a one-line
+note explains why on stderr).
 
 The policy lives in [`src/frops/action.py`](src/frops/action.py) and the
 AWX parser in [`src/frops/awx.py`](src/frops/awx.py); see those modules

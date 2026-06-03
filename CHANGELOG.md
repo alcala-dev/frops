@@ -8,6 +8,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `frops view sku <SKU> --action` HO-ticket resolution: when a `CW0201`
+  BMN has a matching JIRA HO ticket in `Awaiting Support`, the planner
+  appends a status block to the ticket's Description instead of running
+  the `cwctl return-to-triage` fallback. Match is by BMN name, CW-NODE
+  (gmac), or hardware serial — whichever appears in the ticket summary.
+  Falls back to the existing cwctl command when nothing matches.
+  Soft-fails gracefully (note printed, fallback path taken) if JIRA
+  creds are absent or the search itself errors.
+- `frops.jira` module — minimal Atlassian Cloud client (stdlib `urllib`,
+  no new runtime deps): `JIRAClient.search(jql)`,
+  `JIRAClient.append_to_description(key, block)`, `build_search_jql`
+  helper, plus an `_adf_to_text` / `_wrap_as_adf` pair for ADF round-trip.
+  Auth via `JIRA_EMAIL` + `JIRA_TOKEN` env vars (token at
+  https://id.atlassian.com/manage-profile/security/api-tokens).
+- `BMNTarget.serial` (sourced from
+  `metadata.labels."ds.coreweave.com/status.asset.serial"`) plus a
+  `search_identifiers` property that dedups bmn/cw-node/serial for JQL.
+- `PlannedAction.jira_issue` field set by the resolver; when populated,
+  `execute_plan` dispatches the action to a `jira_runner` instead of the
+  shell runner. `actionable_actions` now includes JIRA-resolved actions.
 - `frops view sku <SKU> --action [--yes/-y]` (Phase B execution): after
   rendering the plan, prompts `Run these? [y/N]` and — on yes, or with
   `--yes` skipping the prompt — executes each actionable `cwctl` command

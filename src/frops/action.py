@@ -47,12 +47,31 @@ class BMNTarget:
     The CLI builds these from the kubectl JSON output plus two awxstat
     invocations (mgmt + bmc). Targets without a CW-NODE name are filtered
     out before this struct is created.
+
+    `serial` is the uppercase hardware serial pulled from
+    `metadata.labels."ds.coreweave.com/status.asset.serial"`. Empty when
+    the label is absent. Used by HO-ticket lookup to match titles like
+    `Service Request: RNO2A S484652X4601242`.
     """
 
     bmn: str
     cw_node: str
     sku: str
     awx_reports: tuple[AWXReport, ...]
+    serial: str = ""
+
+    @property
+    def search_identifiers(self) -> tuple[str, ...]:
+        """Distinct identifiers that may appear in an HO ticket summary.
+
+        Order is for stable rendering only — the JQL OR-joins them.
+        Empty strings are dropped so we don't generate vacuous matches.
+        """
+        seen: list[str] = []
+        for value in (self.bmn, self.cw_node, self.serial):
+            if value and value not in seen:
+                seen.append(value)
+        return tuple(seen)
 
     @property
     def detected_codes(self) -> tuple[CWError, ...]:
@@ -71,6 +90,11 @@ class PlannedAction:
     triggering_codes: tuple[str, ...]
     command: str | None
     notes: str
+    # Set by resolve_ho_tickets() when a matching HO ticket is found. When
+    # populated, execution updates the ticket via the JIRA runner instead
+    # of running `command`. Mutually exclusive with `command` in practice:
+    # the resolver always nulls out `command` when it sets `jira_issue`.
+    jira_issue: str | None = None
 
 
 def _power_drain_command(bmn: str, code: str) -> str:
@@ -163,7 +187,9 @@ def render_plan(actions: list[PlannedAction]) -> str:
             lines.append(f"  - {action.bmn} (CW-NODE={action.cw_node}, SKU={action.sku})")
             if action.triggering_codes:
                 lines.append(f"      codes: {', '.join(action.triggering_codes)}")
-            if action.command:
+            if action.jira_issue:
+                lines.append(f"      jira: append to {action.jira_issue} description")
+            elif action.command:
                 lines.append(f"      command: {action.command}")
             lines.append(f"      note: {action.notes}")
 
@@ -172,16 +198,89 @@ def render_plan(actions: list[PlannedAction]) -> str:
     return "\n".join(lines)
 
 
+# ── HO ticket resolution (between classify and execute) ──────────────────────
+
+# Type alias: (identifiers, default_statuses) -> first-matching issue key or None.
+JIRASearchFn = Callable[[tuple[str, ...]], str | None]
+
+
+def resolve_ho_tickets(
+    actions: Iterable[PlannedAction],
+    search_fn: JIRASearchFn,
+    targets_by_bmn: dict[str, BMNTarget],
+) -> list[PlannedAction]:
+    """For each HO_TICKET action, look up the matching JIRA ticket.
+
+    If `search_fn` returns an issue key, replace the action's command with
+    None and set `jira_issue` so execution updates the ticket instead of
+    running return-to-triage. If nothing matches, the action is unchanged
+    and the cwctl fallback runs as before.
+
+    `search_fn` is injected for testability. The CLI binds it to a
+    JIRAClient.search wrapper that builds JQL via build_search_jql.
+    `targets_by_bmn` maps action.bmn → BMNTarget so the resolver can use
+    each target's full identifier set (bmn, cw_node, serial).
+    """
+    resolved: list[PlannedAction] = []
+    for action in actions:
+        if action.kind is not ActionKind.HO_TICKET:
+            resolved.append(action)
+            continue
+
+        target = targets_by_bmn.get(action.bmn)
+        identifiers = target.search_identifiers if target else (action.bmn,)
+        issue_key = search_fn(identifiers)
+        if not issue_key:
+            resolved.append(action)
+            continue
+
+        resolved.append(
+            PlannedAction(
+                bmn=action.bmn,
+                cw_node=action.cw_node,
+                sku=action.sku,
+                kind=action.kind,
+                triggering_codes=action.triggering_codes,
+                command=None,  # JIRA update replaces the cwctl fallback
+                notes=(
+                    f"Found open HO ticket {issue_key} matching "
+                    f"{', '.join(identifiers)} — would append a status block "
+                    "to its Description."
+                ),
+                jira_issue=issue_key,
+            )
+        )
+    return resolved
+
+
+def render_jira_block(action: PlannedAction, timestamp: str) -> str:
+    """Build the wiki-format text appended to an HO ticket's Description.
+
+    `timestamp` is passed in (not generated here) so callers control the
+    format and tests stay deterministic. Use ISO-8601 UTC at the call site.
+    """
+    codes = ", ".join(action.triggering_codes) if action.triggering_codes else "(none)"
+    return (
+        f"---- frops update {timestamp} ----\n"
+        f"BMN:       {action.bmn}\n"
+        f"CW-NODE:   {action.cw_node}\n"
+        f"SKU:       {action.sku}\n"
+        f"Detected:  {codes}\n"
+        f"Note:      {action.notes}"
+    )
+
+
 # ── Phase B: execution ────────────────────────────────────────────────────────
 
 
 def actionable_actions(actions: Iterable[PlannedAction]) -> list[PlannedAction]:
-    """Return only actions whose `command` is non-None — i.e. NOOPs are dropped.
+    """Return only actions that have something to run — shell or JIRA.
 
     Used by the CLI to decide whether to prompt at all (no actionable items =
-    nothing to confirm) and what to hand to `execute_plan`.
+    nothing to confirm) and what to hand to `execute_plan`. NOOP actions
+    (both `command` and `jira_issue` are None) are dropped.
     """
-    return [a for a in actions if a.command is not None]
+    return [a for a in actions if a.command is not None or a.jira_issue is not None]
 
 
 @dataclass(frozen=True)
@@ -219,19 +318,32 @@ class ExecutionSummary:
 def execute_plan(
     actions: Iterable[PlannedAction],
     runner: Callable[[str], int],
+    jira_runner: Callable[[PlannedAction], int] | None = None,
 ) -> ExecutionSummary:
-    """Run each actionable command via `runner`; collect per-action results.
+    """Dispatch each action to the right runner; collect per-action results.
 
-    NOOP actions (command is None) are skipped silently. A failure in one
-    command does NOT abort the rest — partial progress is preferable to
-    leaving the remaining actionable BMNs untouched. The caller decides
-    what to do with `summary.worst_rc`.
+    - `jira_issue` set → `jira_runner(action)` is called. `jira_runner` is
+      required whenever any action has `jira_issue` set; passing None when
+      one is needed raises ValueError so the caller fails fast instead of
+      silently skipping the JIRA update.
+    - `command` set, `jira_issue` None → `runner(command)`.
+    - Both None → skipped silently (NOOP).
+
+    Partial failure does NOT abort. Worst rc is returned via the summary.
     """
     results: list[ExecutionResult] = []
     for action in actions:
-        if action.command is None:
+        if action.jira_issue is not None:
+            if jira_runner is None:
+                raise ValueError(
+                    f"execute_plan: action {action.bmn} has jira_issue "
+                    f"{action.jira_issue!r} but no jira_runner was provided"
+                )
+            rc = jira_runner(action)
+        elif action.command is not None:
+            rc = runner(action.command)
+        else:
             continue
-        rc = runner(action.command)
         results.append(ExecutionResult(action=action, rc=rc))
     return ExecutionSummary(results=tuple(results))
 
@@ -250,6 +362,8 @@ def render_execution_summary(summary: ExecutionSummary) -> str:
         lines.append("\nFailures:")
         for r in summary.failed:
             lines.append(f"  - {r.action.bmn} [{r.action.kind.value}] exit {r.rc}")
-            if r.action.command:
+            if r.action.jira_issue:
+                lines.append(f"      jira:    append to {r.action.jira_issue}")
+            elif r.action.command:
                 lines.append(f"      command: {r.action.command}")
     return "\n".join(lines)

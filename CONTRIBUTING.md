@@ -89,6 +89,23 @@ If you need a brand-new `ActionKind`, that's a bigger change: add the
 enum variant, render it in `render_plan`, and (for Phase B+) wire it
 into the executor.
 
+## JIRA HO-ticket integration
+
+`frops view sku --action` looks up open HO tickets via the Atlassian
+Cloud REST API. Auth is HTTP Basic with email + token:
+
+- `JIRA_EMAIL` — your Atlassian login
+- `JIRA_TOKEN` — API token from
+  <https://id.atlassian.com/manage-profile/security/api-tokens>
+
+Both vars are read by `frops.jira.JIRAClient` at construction. The
+client uses stdlib `urllib` (no runtime deps added) and is mocked in
+tests by patching `frops.jira.urllib.request.urlopen` or replacing
+`frops.cli.JIRAClient` with a stub. JQL is built by
+`frops.jira.build_search_jql` — extend it (e.g. additional statuses,
+new identifier columns) by editing that function and its tests in
+`tests/test_jira.py`.
+
 ## Adding an analyze target
 
 To add a new target to `frops analyze`:

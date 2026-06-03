@@ -702,6 +702,7 @@ _NOOP_BMN_JSON = json.dumps(
                     "labels": {
                         "ds.coreweave.com/sku.cw-sku": "GPU-GH200-01",
                         "flcc.coreweave.com/workflow": "provision-v2",
+                        "flcc.coreweave.com/workflow-step": "dpu-vaultify",
                         "flcc.coreweave.com/state": "fail",
                     },
                 },
@@ -754,7 +755,14 @@ def test_main_view_sku_action_runs_access_check_when_noop_selected(
 
     assert "=== Access check (NOOP nodes without CW codes) ===" in out
     assert "Checked 1 node(s): 1 reachable, 0 unreachable." in out
-    for token in ("ss900770x4200980", "g826cb0", "provision-v2", "fail", "10m"):
+    for token in (
+        "ss900770x4200980",
+        "g826cb0",
+        "provision-v2",
+        "dpu-vaultify",  # workflow-step label flows through to the table
+        "fail",
+        "10m",
+    ):
         assert token in out
 
 

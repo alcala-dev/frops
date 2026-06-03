@@ -10,6 +10,7 @@ from frops.access import (
     check_access,
     check_all,
     render_access_summary,
+    render_missing_cwnode_summary,
 )
 from frops.action import ActionKind, BMNTarget, PlannedAction
 
@@ -249,7 +250,7 @@ def test_render_access_summary_shows_header_table_and_counts() -> None:
         ),
     ]
     rendered = render_access_summary(reports)
-    assert "=== Access check (NOOP nodes without CW codes) ===" in rendered
+    assert "=== Access check (NOOP + missing CW-NODE) ===" in rendered
     assert "Checked 2 node(s): 1 reachable, 1 unreachable." in rendered
     # Header tokens present
     for token in ("BMN", "CW-NODE", "WORKFLOW", "WORKFLOW-STEP", "STATE", "TS", "REACH"):
@@ -284,3 +285,66 @@ def test_render_access_summary_shows_detail_for_chassis_power_off() -> None:
     rendered = render_access_summary(reports)
     # "off" is a known value — should NOT trigger the detail annotation.
     assert "↳ Chassis Power is off" not in rendered
+
+
+def test_render_access_summary_shows_none_for_empty_cw_node() -> None:
+    """CW-NODE-less BMNs are included in the same access table; their
+    CW-NODE column reads `(none)` so they're unambiguous."""
+    reports = [
+        AccessReport(
+            bmn="bmn-stub",
+            cw_node="",
+            workflow="provision-v2",
+            workflow_step="fielddiag",
+            state="fail",
+            ts="1d",
+            reachable=False,
+            detail="exit 1",
+        ),
+    ]
+    rendered = render_access_summary(reports)
+    assert "(none)" in rendered
+    # bmn-stub row should be unreachable
+    assert "no" in rendered
+    assert "Checked 1 node(s): 0 reachable, 1 unreachable." in rendered
+
+
+# --------------------------- render_missing_cwnode_summary ------------------
+
+
+def test_render_missing_cwnode_summary_empty_returns_empty_string() -> None:
+    assert render_missing_cwnode_summary([]) == ""
+
+
+def test_render_missing_cwnode_summary_renders_table_with_findings() -> None:
+    targets = [
+        BMNTarget(
+            bmn="ss900770x4113539",
+            cw_node="",
+            sku="GPU-GH200-01",
+            awx_reports=(),
+            workflow="provision-v2",
+            workflow_step="fielddiag",
+            state="fail",
+        ),
+        BMNTarget(
+            bmn="ss900770x4202580",
+            cw_node="",
+            sku="GPU-GH200-01",
+            awx_reports=(),
+            workflow="",  # missing label
+            workflow_step="",
+            state="",
+        ),
+    ]
+    rendered = render_missing_cwnode_summary(targets)
+    assert "=== BMNs missing CW-NODE (2) ===" in rendered
+    # Header tokens
+    for token in ("BMN", "WORKFLOW", "WORKFLOW-STEP", "STATE"):
+        assert token in rendered
+    # First BMN's known values
+    for value in ("ss900770x4113539", "provision-v2", "fielddiag", "fail"):
+        assert value in rendered
+    # Missing labels fall back to "(unknown)" so the row is never blank
+    assert "(unknown)" in rendered
+    assert "ss900770x4202580" in rendered

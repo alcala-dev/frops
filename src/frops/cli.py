@@ -10,7 +10,12 @@ from datetime import datetime, timezone
 from typing import Any
 
 from frops import __version__
-from frops.access import access_check_targets, check_all, render_access_summary
+from frops.access import (
+    access_check_targets,
+    check_all,
+    render_access_summary,
+    render_missing_cwnode_summary,
+)
 from frops.action import (
     ActionKind,
     BMNTarget,
@@ -178,10 +183,11 @@ def _run_sku_action_plan(sku: str, user_filter: str | None, *, auto_yes: bool = 
         print("\n=== Planned actions ===\n\n(no BMNs returned by the SKU query)")
         return 0
 
-    targets, skipped = _build_targets(items, sku)
+    targets, missing_cwnode = _build_targets(items, sku)
 
-    if skipped:
-        print(f"\n(skipped {len(skipped)} BMN(s) with empty CW-NODE: {', '.join(skipped)})")
+    if missing_cwnode:
+        print()
+        print(render_missing_cwnode_summary(missing_cwnode))
 
     actions = [classify(target) for target in targets]
 
@@ -198,20 +204,23 @@ def _run_sku_action_plan(sku: str, user_filter: str | None, *, auto_yes: bool = 
     print(render_plan(actions))
 
     actionable = actionable_actions(actions)
-    access_targets = access_check_targets(actions, targets_by_bmn)
+    # Combined pool for the access pass: NOOP-no-codes from the plan AND any
+    # CW-NODE-less BMNs. The reachability probe is the same shell call for
+    # both, and the operator wants both groups checked under one prompt.
+    access_pool = access_check_targets(actions, targets_by_bmn) + list(missing_cwnode)
 
-    if not actionable and not access_targets:
+    if not actionable and not access_pool:
         print("\nNothing to do.")
         return 0
 
     # Per-group selection: which ActionKinds run via execute_plan, and
-    # whether the NOOP access-check pass fires. --yes selects everything;
+    # whether the access-check pass fires. --yes selects everything;
     # otherwise we prompt with letter shortcuts ([a]ll/[p]/[h]/[n]/Enter).
     if auto_yes:
         selected_kinds: set[ActionKind] = {a.kind for a in actionable}
-        run_access = bool(access_targets)
+        run_access = bool(access_pool)
     else:
-        selected_kinds, run_access = _prompt_group_selection(actionable, access_targets)
+        selected_kinds, run_access = _prompt_group_selection(actionable, access_pool)
         if not selected_kinds and not run_access:
             print("Aborted by user. Nothing was executed.")
             return 0
@@ -229,9 +238,9 @@ def _run_sku_action_plan(sku: str, user_filter: str | None, *, auto_yes: bool = 
         print(render_execution_summary(summary))
         plan_rc = summary.worst_rc
 
-    if run_access and access_targets:
+    if run_access and access_pool:
         print()
-        reports = check_all(access_targets, capture_command)
+        reports = check_all(access_pool, capture_command)
         print(render_access_summary(reports))
 
     return plan_rc
@@ -374,15 +383,18 @@ def _prompt_group_selection(
 
 def _build_targets(
     items: list[dict[str, Any]], default_sku: str
-) -> tuple[list[BMNTarget], list[str]]:
+) -> tuple[list[BMNTarget], list[BMNTarget]]:
     """Build BMNTargets from raw kubectl JSON `items`.
 
-    Returns `(targets, skipped_bmn_names)`. A BMN is "skipped" when it has
-    no CW-NODE (i.e. `.status.reportedNodeInfo.nodeName` is empty) — those
-    can't be actioned even if AWX shows failures, per the spec.
+    Returns `(targets, missing_cwnode)`. Both lists contain BMNTargets;
+    items end up in `missing_cwnode` when `status.reportedNodeInfo.nodeName`
+    is empty — those can't be classified by AWX (no node to query), so we
+    skip awxstat and leave `awx_reports=()`. They still get full workflow /
+    state / TS / SKU labels so the diagnostic surface (dedicated section
+    + access check) has everything it needs.
     """
     targets: list[BMNTarget] = []
-    skipped: list[str] = []
+    missing_cwnode: list[BMNTarget] = []
 
     for item in items:
         metadata = item.get("metadata") or {}
@@ -392,9 +404,6 @@ def _build_targets(
 
         if not bmn_name:
             continue
-        if not reported_node:
-            skipped.append(bmn_name)
-            continue
 
         labels = metadata.get("labels") or {}
         sku = labels.get("ds.coreweave.com/sku.cw-sku", default_sku)
@@ -402,6 +411,21 @@ def _build_targets(
         workflow = labels.get("flcc.coreweave.com/workflow", "")
         workflow_step = labels.get("flcc.coreweave.com/workflow-step", "")
         state = labels.get("flcc.coreweave.com/state", "")
+
+        if not reported_node:
+            missing_cwnode.append(
+                BMNTarget(
+                    bmn=bmn_name,
+                    cw_node="",
+                    sku=sku,
+                    awx_reports=(),
+                    serial=serial,
+                    workflow=workflow,
+                    workflow_step=workflow_step,
+                    state=state,
+                )
+            )
+            continue
 
         reports = _collect_awx_reports(bmn_name)
         targets.append(
@@ -417,7 +441,7 @@ def _build_targets(
             )
         )
 
-    return targets, skipped
+    return targets, missing_cwnode
 
 
 def _collect_awx_reports(bmn: str) -> list[AWXReport]:

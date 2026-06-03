@@ -112,16 +112,18 @@ def render_access_summary(reports: list[AccessReport]) -> str:
     unreachable = len(reports) - reachable
 
     lines: list[str] = [
-        "=== Access check (NOOP nodes without CW codes) ===",
+        "=== Access check (NOOP + missing CW-NODE) ===",
         f"\nChecked {len(reports)} node(s): {reachable} reachable, {unreachable} unreachable.",
         "",
     ]
 
     # Right-pad each column to the widest value in that column so the table
     # stays aligned without depending on terminal-rendering libraries.
+    # `cw_node` is rendered as "(none)" when empty (CW-NODE-less BMNs) so
+    # the row is unambiguously not a normal NOOP-clean node.
     cols: list[tuple[str, list[str]]] = [
         ("BMN", [r.bmn for r in reports]),
-        ("CW-NODE", [r.cw_node for r in reports]),
+        ("CW-NODE", [r.cw_node or "(none)" for r in reports]),
         ("WORKFLOW", [r.workflow for r in reports]),
         ("WORKFLOW-STEP", [r.workflow_step for r in reports]),
         ("STATE", [r.state for r in reports]),
@@ -139,6 +141,42 @@ def render_access_summary(reports: list[AccessReport]) -> str:
         if not r.reachable or r.detail not in ("Chassis Power is on", "Chassis Power is off"):
             lines.append(f"    ↳ {r.detail}")
 
+    return "\n".join(lines)
+
+
+def render_missing_cwnode_summary(targets: list[BMNTarget]) -> str:
+    """Dedicated section for BMNs that have no CW-NODE.
+
+    These appear above the planned-actions block (they can't be classified
+    by AWX, so they're not in any action group), and the same BMNs also
+    show up in the access-check table when `[n]` is selected so the
+    operator gets reachability info too.
+    """
+    if not targets:
+        return ""
+
+    lines: list[str] = [
+        f"=== BMNs missing CW-NODE ({len(targets)}) ===",
+        "",
+        "No `status.reportedNodeInfo.nodeName` is set on these BMNs — AWX",
+        "can't be queried for them, so they're not classified into an action",
+        "group. Reachability is included in the access check when [n] is",
+        "selected.",
+        "",
+    ]
+
+    cols: list[tuple[str, list[str]]] = [
+        ("BMN", [t.bmn for t in targets]),
+        ("WORKFLOW", [t.workflow or "(unknown)" for t in targets]),
+        ("WORKFLOW-STEP", [t.workflow_step or "(unknown)" for t in targets]),
+        ("STATE", [t.state or "(unknown)" for t in targets]),
+    ]
+    widths = [max(len(h), max(len(v) for v in vs)) for h, vs in cols]
+    lines.append("  ".join(h.ljust(w) for (h, _), w in zip(cols, widths, strict=True)))
+    lines.append("  ".join("-" * w for w in widths))
+    for i in range(len(targets)):
+        row = [vs[i] for _, vs in cols]
+        lines.append("  ".join(v.ljust(w) for v, w in zip(row, widths, strict=True)))
     return "\n".join(lines)
 
 

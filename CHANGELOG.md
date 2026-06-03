@@ -22,6 +22,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   NOOP-clean targets exist.
 
 ### Changed
+- Access check enforces a **20-second wall-clock timeout** on each
+  `jumpipmitool` probe. Unreachable BMCs that previously could wedge
+  the IPMI handshake for minutes now report
+  `timed out after 20s` and the row is marked unreachable; the pass
+  continues with the next BMN. Detail is rendered as the explicit
+  timeout string (not partial ipmitool output) so the failure mode is
+  unambiguous in the access table.
+- `frops.commands.capture_command(command, timeout=None)` — new
+  optional `timeout` arg. When the timeout fires, returns
+  `(partial_output_with_marker, 124)` — exit code 124 matches GNU
+  `timeout`'s convention so callers can distinguish a timeout from a
+  regular non-zero exit. Subprocess is killed when the timeout fires.
 - BMNs without a `status.reportedNodeInfo.nodeName` (no CW-NODE) are
   no longer silently logged via the
   `(skipped N BMN(s) with empty CW-NODE: …)` line. They now get:

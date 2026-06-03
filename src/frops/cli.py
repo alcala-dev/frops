@@ -5,16 +5,22 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from collections.abc import Callable
+from datetime import datetime, timezone
 from typing import Any
 
 from frops import __version__
 from frops.action import (
+    ActionKind,
     BMNTarget,
+    PlannedAction,
     actionable_actions,
     classify,
     execute_plan,
     render_execution_summary,
+    render_jira_block,
     render_plan,
+    resolve_ho_tickets,
 )
 from frops.awx import AWXReport, parse_awxstat
 from frops.catalog import (
@@ -26,6 +32,17 @@ from frops.catalog import (
     SKU_VIEW_TEMPLATE_JSON,
 )
 from frops.commands import capture_command, run_command
+from frops.jira import (
+    DEFAULT_PROJECT as JIRA_PROJECT,
+)
+from frops.jira import (
+    DEFAULT_STATUSES as JIRA_OPEN_STATUSES,
+)
+from frops.jira import (
+    JIRAClient,
+    JIRAError,
+    build_search_jql,
+)
 
 VIEW_TYPES: tuple[str, ...] = (*FAIL_TYPES, "sku")
 
@@ -166,6 +183,16 @@ def _run_sku_action_plan(sku: str, user_filter: str | None, *, auto_yes: bool = 
         print(f"\n(skipped {len(skipped)} BMN(s) with empty CW-NODE: {', '.join(skipped)})")
 
     actions = [classify(target) for target in targets]
+
+    # Resolve HO-ticket actions against JIRA before rendering the plan so
+    # the user sees "would update HO-12345" rather than the cwctl fallback.
+    # Soft-fail on any JIRA issue (auth missing, network down): the actions
+    # stay on the cwctl fallback path and we surface the reason once.
+    jira_client = _try_make_jira_client()
+    targets_by_bmn = {t.bmn: t for t in targets}
+    if jira_client is not None and any(a.kind is ActionKind.HO_TICKET for a in actions):
+        actions = _resolve_with_jira(actions, jira_client, targets_by_bmn)
+
     print()
     print(render_plan(actions))
 
@@ -179,10 +206,75 @@ def _run_sku_action_plan(sku: str, user_filter: str | None, *, auto_yes: bool = 
         return 0
 
     print()  # blank line before each cwctl command's own output starts streaming
-    summary = execute_plan(actionable, run_command)
+    summary = execute_plan(
+        actionable,
+        run_command,
+        jira_runner=_build_jira_runner(jira_client) if jira_client is not None else None,
+    )
     print()
     print(render_execution_summary(summary))
     return summary.worst_rc
+
+
+def _try_make_jira_client() -> JIRAClient | None:
+    """Construct JIRAClient or print a one-line note and return None.
+
+    HO-ticket lookup is best-effort: missing creds shouldn't break power-drain
+    actions or the cwctl fallback. We print a single visible reason so the
+    user knows why JIRA matching was skipped.
+    """
+    try:
+        return JIRAClient()
+    except JIRAError as exc:
+        print(f"\nnote: JIRA lookup disabled — {exc}", file=sys.stderr)
+        return None
+
+
+def _resolve_with_jira(
+    actions: list[PlannedAction],
+    client: JIRAClient,
+    targets_by_bmn: dict[str, BMNTarget],
+) -> list[PlannedAction]:
+    """Build the search closure and run the resolver. Soft-fail on JIRAError."""
+
+    def _search(identifiers: tuple[str, ...]) -> str | None:
+        try:
+            jql = build_search_jql(JIRA_PROJECT, identifiers, JIRA_OPEN_STATUSES)
+            issues = client.search(jql)
+        except (JIRAError, ValueError) as exc:
+            # Per-BMN failure: log once and fall back. Don't poison the whole
+            # batch — power-drain actions in the same plan should still run.
+            print(
+                f"warning: JIRA search failed for {identifiers}: {exc}",
+                file=sys.stderr,
+            )
+            return None
+        # First match wins. JIRA returns issues in default order (recently
+        # updated); for HO ticket dedup that's the right pick.
+        return issues[0].key if issues else None
+
+    return resolve_ho_tickets(actions, _search, targets_by_bmn)
+
+
+def _build_jira_runner(client: JIRAClient) -> Callable[[PlannedAction], int]:
+    """Return a runner that appends a status block to action.jira_issue."""
+
+    def _run(action: PlannedAction) -> int:
+        assert action.jira_issue is not None  # guarded by execute_plan dispatch
+        timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        block = render_jira_block(action, timestamp)
+        try:
+            client.append_to_description(action.jira_issue, block)
+        except JIRAError as exc:
+            print(
+                f"error: failed to update {action.jira_issue} for {action.bmn}: {exc}",
+                file=sys.stderr,
+            )
+            return 1
+        print(f"updated {action.jira_issue} for {action.bmn}")
+        return 0
+
+    return _run
 
 
 def _prompt_yes_no(prompt: str) -> bool:
@@ -221,6 +313,7 @@ def _build_targets(
 
         labels = metadata.get("labels") or {}
         sku = labels.get("ds.coreweave.com/sku.cw-sku", default_sku)
+        serial = labels.get("ds.coreweave.com/status.asset.serial", "")
 
         reports = _collect_awx_reports(bmn_name)
         targets.append(
@@ -229,6 +322,7 @@ def _build_targets(
                 cw_node=reported_node,
                 sku=sku,
                 awx_reports=tuple(reports),
+                serial=serial,
             )
         )
 

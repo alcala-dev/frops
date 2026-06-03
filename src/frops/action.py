@@ -1,10 +1,13 @@
 """Classify BMNs by detected CW codes and build a per-BMN action plan.
 
-Phase A: this module only builds and renders a plan — it does *not* execute
-cwctl, talk to JIRA, or otherwise mutate state. Phase B will introduce
-execution behind `--yes`, and Phase C will summarize actioned nodes via the
-Anthropic API. Keeping classification pure makes the policy easy to test
-in isolation from kubectl/awxstat/cwctl.
+Phase A built the plan (read-only). Phase B (this module's `execute_plan`)
+runs the rendered `cwctl` commands for actions with a non-None command,
+gated by the CLI's `--yes`/prompt logic. JIRA HO-ticket lookups are *not*
+implemented yet — HO actions still fall back to the return-to-triage
+command. Phase C will summarize actioned nodes via the Anthropic API.
+
+Classification stays free of subprocess concerns; execution accepts a
+`runner` callable so tests can drive it without touching the shell.
 
 Policy mapping (see CONTRIBUTING for the source-of-truth recipe):
 
@@ -19,6 +22,7 @@ present on the same BMN — the simpler remediation runs first.
 
 from __future__ import annotations
 
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from enum import Enum
 
@@ -165,4 +169,87 @@ def render_plan(actions: list[PlannedAction]) -> str:
 
     totals = ", ".join(f"{kind.value}={len(by_kind.get(kind, []))}" for kind in ActionKind)
     lines.append(f"\nTotals: {totals}")
+    return "\n".join(lines)
+
+
+# ── Phase B: execution ────────────────────────────────────────────────────────
+
+
+def actionable_actions(actions: Iterable[PlannedAction]) -> list[PlannedAction]:
+    """Return only actions whose `command` is non-None — i.e. NOOPs are dropped.
+
+    Used by the CLI to decide whether to prompt at all (no actionable items =
+    nothing to confirm) and what to hand to `execute_plan`.
+    """
+    return [a for a in actions if a.command is not None]
+
+
+@dataclass(frozen=True)
+class ExecutionResult:
+    """Outcome of running one PlannedAction's command."""
+
+    action: PlannedAction
+    rc: int
+
+    @property
+    def succeeded(self) -> bool:
+        return self.rc == 0
+
+
+@dataclass(frozen=True)
+class ExecutionSummary:
+    """All ExecutionResults from one execute_plan() pass."""
+
+    results: tuple[ExecutionResult, ...]
+
+    @property
+    def succeeded(self) -> tuple[ExecutionResult, ...]:
+        return tuple(r for r in self.results if r.succeeded)
+
+    @property
+    def failed(self) -> tuple[ExecutionResult, ...]:
+        return tuple(r for r in self.results if not r.succeeded)
+
+    @property
+    def worst_rc(self) -> int:
+        # max() over an empty iterable would raise; default 0 == "all good".
+        return max((r.rc for r in self.results), default=0)
+
+
+def execute_plan(
+    actions: Iterable[PlannedAction],
+    runner: Callable[[str], int],
+) -> ExecutionSummary:
+    """Run each actionable command via `runner`; collect per-action results.
+
+    NOOP actions (command is None) are skipped silently. A failure in one
+    command does NOT abort the rest — partial progress is preferable to
+    leaving the remaining actionable BMNs untouched. The caller decides
+    what to do with `summary.worst_rc`.
+    """
+    results: list[ExecutionResult] = []
+    for action in actions:
+        if action.command is None:
+            continue
+        rc = runner(action.command)
+        results.append(ExecutionResult(action=action, rc=rc))
+    return ExecutionSummary(results=tuple(results))
+
+
+def render_execution_summary(summary: ExecutionSummary) -> str:
+    """Human-readable post-run report — counts + failed-BMN list."""
+    if not summary.results:
+        return "=== Execution summary ===\n\n(no actionable items were executed)"
+
+    lines: list[str] = [
+        "=== Execution summary ===",
+        f"\nRan {len(summary.results)} action(s): "
+        f"{len(summary.succeeded)} succeeded, {len(summary.failed)} failed.",
+    ]
+    if summary.failed:
+        lines.append("\nFailures:")
+        for r in summary.failed:
+            lines.append(f"  - {r.action.bmn} [{r.action.kind.value}] exit {r.rc}")
+            if r.action.command:
+                lines.append(f"      command: {r.action.command}")
     return "\n".join(lines)

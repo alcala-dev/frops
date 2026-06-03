@@ -8,7 +8,14 @@ import sys
 from typing import Any
 
 from frops import __version__
-from frops.action import BMNTarget, classify, render_plan
+from frops.action import (
+    BMNTarget,
+    actionable_actions,
+    classify,
+    execute_plan,
+    render_execution_summary,
+    render_plan,
+)
 from frops.awx import AWXReport, parse_awxstat
 from frops.catalog import (
     ANALYZE_COMMANDS,
@@ -67,6 +74,16 @@ def format_section(label: str, cmd: str, output: str, rc: int) -> str:
 
 
 def handle_view(args: argparse.Namespace) -> int:
+    action_flag = getattr(args, "action", False)
+    yes_flag = getattr(args, "yes", False)
+
+    if yes_flag and not action_flag:
+        print(
+            "error: --yes requires --action (nothing to confirm without a plan)",
+            file=sys.stderr,
+        )
+        return 2
+
     if args.fail_type == "sku":
         if not args.sku_value:
             print(
@@ -83,9 +100,9 @@ def handle_view(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 2
-        if getattr(args, "action", False):
+        if action_flag:
             print(
-                "error: --action is only supported with 'view sku' in Phase A",
+                "error: --action is only supported with 'view sku'",
                 file=sys.stderr,
             )
             return 2
@@ -97,24 +114,31 @@ def handle_view(args: argparse.Namespace) -> int:
     print(f"Command: {cmd}\n")
 
     if args.dry_run:
-        if getattr(args, "action", False):
-            print("(--action would also fetch JSON BMN data + per-BMN awxstat output)")
+        if action_flag:
+            note = "(--action would also fetch JSON BMN data + per-BMN awxstat output"
+            note += "; --yes would then execute the rendered cwctl commands)" if yes_flag else ")"
+            print(note)
         return 0
 
     view_rc = run_command(cmd)
-    if not getattr(args, "action", False):
+    if not action_flag:
         return view_rc
 
-    plan_rc = _run_sku_action_plan(args.sku_value, args.user_filter)
+    plan_rc = _run_sku_action_plan(args.sku_value, args.user_filter, auto_yes=yes_flag)
     return max(view_rc, plan_rc)
 
 
-def _run_sku_action_plan(sku: str, user_filter: str | None) -> int:
-    """Phase A: fetch BMN JSON + awxstat output, classify, print a plan.
+def _run_sku_action_plan(sku: str, user_filter: str | None, *, auto_yes: bool = False) -> int:
+    """Fetch BMN JSON + awxstat output, classify, print a plan, optionally execute.
 
-    Returns a non-zero exit only on hard failures (kubectl JSON fetch fails,
-    JSON parse fails). Per-BMN awxstat failures are logged and skipped — the
-    BMN is excluded from the plan rather than aborting the whole pass.
+    Phase A behavior (auto_yes=False, no prompt response, or all NOOPs) prints
+    the plan and returns 0. Phase B execution runs each actionable command via
+    `run_command` and returns the worst exit code among them.
+
+    Returns a non-zero exit on hard failures (kubectl JSON fetch fails, JSON
+    parse fails) or on partial execution failure. Per-BMN awxstat failures are
+    logged and skipped — the BMN is excluded from the plan rather than
+    aborting the whole pass.
     """
     json_cmd = build_sku_command_json(sku, user_filter)
     raw, rc = capture_command(json_cmd)
@@ -144,8 +168,31 @@ def _run_sku_action_plan(sku: str, user_filter: str | None) -> int:
     actions = [classify(target) for target in targets]
     print()
     print(render_plan(actions))
-    print("\nnote: Phase A is read-only. No cwctl/JIRA actions were executed.")
-    return 0
+
+    actionable = actionable_actions(actions)
+    if not actionable:
+        print("\nNothing actionable to execute.")
+        return 0
+
+    if not auto_yes and not _prompt_yes_no(f"\nRun {len(actionable)} action(s) above?"):
+        print("Aborted by user. No cwctl actions were executed.")
+        return 0
+
+    print()  # blank line before each cwctl command's own output starts streaming
+    summary = execute_plan(actionable, run_command)
+    print()
+    print(render_execution_summary(summary))
+    return summary.worst_rc
+
+
+def _prompt_yes_no(prompt: str) -> bool:
+    """Interactive y/N prompt. Returns False on empty/EOF/Ctrl-C/non-yes."""
+    try:
+        answer = input(f"{prompt} [y/N]: ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print()  # newline so the next print isn't on the prompt line
+        return False
+    return answer in ("y", "yes")
 
 
 def _build_targets(
@@ -280,8 +327,16 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "After displaying results, inspect AWX jobs per BMN, "
-            "classify by CW codes, and print an action plan. "
-            "Read-only in Phase A; execution lands in a follow-up."
+            "classify by CW codes, and print an action plan."
+        ),
+    )
+    view_parser.add_argument(
+        "-y",
+        "--yes",
+        action="store_true",
+        help=(
+            "With --action: skip the confirmation prompt and execute the "
+            "planned cwctl commands. Without --action this flag is rejected."
         ),
     )
     view_parser.set_defaults(func=handle_view)

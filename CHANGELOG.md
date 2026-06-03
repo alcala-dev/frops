@@ -8,12 +8,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `frops view sku <SKU> --action [--yes/-y]` (Phase B execution): after
+  rendering the plan, prompts `Run these? [y/N]` and — on yes, or with
+  `--yes` skipping the prompt — executes each actionable `cwctl` command
+  via `run_command` (streaming output, preserving colors). HO-ticket
+  actions still execute the return-to-triage fallback; JIRA search /
+  update lands in a later phase. An `=== Execution summary ===` block
+  reports succeeded/failed counts and lists failed BMNs with their exit
+  codes; the worst per-action rc propagates as the process exit code.
+  Partial failure does not abort the run — remaining BMNs are still
+  attempted. `--yes` without `--action` exits 2 with a clear error.
+- `frops.action.execute_plan(actions, runner)` plus `ExecutionResult`,
+  `ExecutionSummary`, `actionable_actions`, and `render_execution_summary`
+  helpers. Execution accepts a `runner` callable so tests can drive it
+  without spawning subprocesses.
 - `frops view sku <SKU> --action` (Phase A, read-only): after the
   existing display, runs `awxstat -l mgmt|bmc` per BMN with a non-empty
   `CW-NODE`, parses CW error codes, and prints a per-node remediation
   plan. Power-drain is planned for `CW0211`/`CW0102` on `GPU-GH200-01`;
-  HO ticket / return-to-triage is planned for `CW0201`. Nothing is
-  executed yet — Phase B will lift the rendered commands behind `--yes`.
+  HO ticket / return-to-triage is planned for `CW0201`.
 - New modules: `frops.awx` (parser for `awxstat` text output, returns
   `AWXReport` + `CWError`) and `frops.action` (classifier, `BMNTarget`,
   `PlannedAction`, plan renderer). Both are pure-functional with full

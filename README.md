@@ -83,12 +83,19 @@ The excluded states are `production`, `ready`, `rma`, `broken`, `dev`,
 
 `frops view sku <SKU> --action` shows the existing colored table, then
 inspects each returned BMN's AWX jobs and prints a per-node remediation
-plan. **Phase A is read-only** — it prints the `cwctl` commands and JIRA
-lookups that *would* run, but executes nothing. Execution is coming in a
-follow-up behind an explicit `--yes`.
+plan. By default it stops there and asks `Run these? [y/N]`; passing
+`--yes` (or `-y`) skips the prompt and executes immediately. Use
+`--dry-run` if you want the plan without any prompt or execution.
 
 ```bash
+# Plan only, then prompt — answer 'y' to execute, anything else to abort
 frops view sku GPU-GH200-01 --action
+
+# Plan and execute without prompting (CI / scripted use)
+frops view sku GPU-GH200-01 --action --yes
+
+# Plan only, never prompt or execute
+frops --dry-run view sku GPU-GH200-01 --action
 ```
 
 What `--action` does, per BMN with a non-empty `CW-NODE`:
@@ -99,11 +106,16 @@ What `--action` does, per BMN with a non-empty `CW-NODE`:
    - **`CW0211` or `CW0102` on SKU `GPU-GH200-01`** → power-drain via
      `cwctl flcc node --one-off -w orphan -s power-drain …`
    - **`CW0201`** → search JIRA for an HO ticket in "Awaiting Support"
-     (Phase B); fall back to `cwctl flcc node -w return-to-triage …`
-     if none exists.
+     (later phase); for now, falls back to
+     `cwctl flcc node -w return-to-triage …`.
    - Other / no codes → no-op.
 4. Prints a grouped plan with the exact commands that would run and a
    totals line.
+5. With `--yes` (or after a yes-prompt response): runs each actionable
+   `cwctl` command in order, streaming its output. A failure on one BMN
+   does **not** abort the rest — the run continues and the worst exit
+   code propagates as the process exit. An `=== Execution summary ===`
+   block at the end lists any failures with their `cwctl` exit codes.
 
 BMNs without a `CW-NODE` are listed as skipped — there's nothing to
 action on a node that hasn't joined a cluster.

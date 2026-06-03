@@ -197,35 +197,44 @@ def _run_sku_action_plan(sku: str, user_filter: str | None, *, auto_yes: bool = 
     print()
     print(render_plan(actions))
 
-    # Diagnostic access pass for NOOP nodes with no CW codes — they're not
-    # planned for action, but a BMC unreachability check often explains why
-    # the node is stuck (offline at the hardware level vs a software issue).
-    # Runs regardless of `--yes` since it's read-only; failures don't
-    # affect the process exit code.
-    access_targets = access_check_targets(actions, targets_by_bmn)
-    if access_targets:
-        access_reports = check_all(access_targets, capture_command)
-        print()
-        print(render_access_summary(access_reports))
-
     actionable = actionable_actions(actions)
-    if not actionable:
-        print("\nNothing actionable to execute.")
+    access_targets = access_check_targets(actions, targets_by_bmn)
+
+    if not actionable and not access_targets:
+        print("\nNothing to do.")
         return 0
 
-    if not auto_yes and not _prompt_yes_no(f"\nRun {len(actionable)} action(s) above?"):
-        print("Aborted by user. No cwctl actions were executed.")
-        return 0
+    # Per-group selection: which ActionKinds run via execute_plan, and
+    # whether the NOOP access-check pass fires. --yes selects everything;
+    # otherwise we prompt with letter shortcuts ([a]ll/[p]/[h]/[n]/Enter).
+    if auto_yes:
+        selected_kinds: set[ActionKind] = {a.kind for a in actionable}
+        run_access = bool(access_targets)
+    else:
+        selected_kinds, run_access = _prompt_group_selection(actionable, access_targets)
+        if not selected_kinds and not run_access:
+            print("Aborted by user. Nothing was executed.")
+            return 0
 
-    print()  # blank line before each cwctl command's own output starts streaming
-    summary = execute_plan(
-        actionable,
-        run_command,
-        jira_runner=_build_jira_runner(jira_client) if jira_client is not None else None,
-    )
-    print()
-    print(render_execution_summary(summary))
-    return summary.worst_rc
+    plan_rc = 0
+    to_execute = [a for a in actionable if a.kind in selected_kinds]
+    if to_execute:
+        print()  # blank line before cwctl streams its own output
+        summary = execute_plan(
+            to_execute,
+            run_command,
+            jira_runner=_build_jira_runner(jira_client) if jira_client is not None else None,
+        )
+        print()
+        print(render_execution_summary(summary))
+        plan_rc = summary.worst_rc
+
+    if run_access and access_targets:
+        print()
+        reports = check_all(access_targets, capture_command)
+        print(render_access_summary(reports))
+
+    return plan_rc
 
 
 def _try_make_jira_client() -> JIRAClient | None:
@@ -289,14 +298,78 @@ def _build_jira_runner(client: JIRAClient) -> Callable[[PlannedAction], int]:
     return _run
 
 
-def _prompt_yes_no(prompt: str) -> bool:
-    """Interactive y/N prompt. Returns False on empty/EOF/Ctrl-C/non-yes."""
+def _prompt_group_selection(
+    actionable: list[PlannedAction],
+    access_targets: list[BMNTarget],
+) -> tuple[set[ActionKind], bool]:
+    """Letter-shortcut prompt: which groups should execute?
+
+    Returns `(selected_kinds, run_access_check)`. Empty input, EOF, or
+    Ctrl-C means abort — both return values are empty/False.
+
+    Letter map (only the groups present in the plan are offered):
+        a       → everything available
+        p       → power-drain actions
+        h       → ho-ticket actions
+        n       → NOOP access check
+        p,h,n   → comma-separated combinations
+
+    Anything else (including empty/EOF) aborts. `n` (lowercase) is distinct
+    from a missing/empty answer, so users can pick noop-only without it
+    being interpreted as "no".
+    """
+    # Each option = (letter, kind-or-None, display-label, count). The letter
+    # appears in brackets inside the label so the prompt reads like
+    # `[p]ower-drain (3)` instead of `[p]power-drain (3)`.
+    options: list[tuple[str, ActionKind | None, str, int]] = []
+    counts_by_kind: dict[ActionKind, int] = {}
+    for a in actionable:
+        counts_by_kind[a.kind] = counts_by_kind.get(a.kind, 0) + 1
+    if ActionKind.POWER_DRAIN in counts_by_kind:
+        options.append(
+            ("p", ActionKind.POWER_DRAIN, "[p]ower-drain", counts_by_kind[ActionKind.POWER_DRAIN])
+        )
+    if ActionKind.HO_TICKET in counts_by_kind:
+        options.append(
+            ("h", ActionKind.HO_TICKET, "[h]o-ticket", counts_by_kind[ActionKind.HO_TICKET])
+        )
+    if access_targets:
+        # ActionKind.NOOP would be misleading — NOOP actions have no command.
+        # The `n` letter triggers the diagnostic access check pass instead.
+        options.append(("n", None, "[n]oop-access", len(access_targets)))
+
+    if not options:
+        return set(), False
+
+    parts = ["[a]ll"] + [f"{label} ({count})" for _, _, label, count in options]
+    parts.append("Enter to abort")
+    prompt = "\nRun? " + "  /  ".join(parts) + ": "
+
     try:
-        answer = input(f"{prompt} [y/N]: ").strip().lower()
+        ans = input(prompt).strip().lower()
     except (EOFError, KeyboardInterrupt):
-        print()  # newline so the next print isn't on the prompt line
-        return False
-    return answer in ("y", "yes")
+        print()  # newline so the next print doesn't sit on the prompt line
+        return set(), False
+
+    if not ans:
+        return set(), False
+
+    if ans == "a":
+        kinds = {kind for _, kind, _, _ in options if kind is not None}
+        return kinds, any(letter == "n" for letter, _, _, _ in options)
+
+    selected_kinds: set[ActionKind] = set()
+    run_access = False
+    letter_to_kind = {letter: kind for letter, kind, _, _ in options}
+    for piece in (p.strip() for p in ans.split(",")):
+        if piece not in letter_to_kind:
+            continue  # silently ignore unknown letters
+        kind = letter_to_kind[piece]
+        if kind is None:
+            run_access = True
+        else:
+            selected_kinds.add(kind)
+    return selected_kinds, run_access
 
 
 def _build_targets(

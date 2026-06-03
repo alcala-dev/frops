@@ -291,10 +291,11 @@ def _awx_with_code(code: str = "CW0211") -> str:
     )
 
 
-def test_main_view_sku_action_without_yes_prompts_and_aborts_on_no(
+def test_main_view_sku_action_without_yes_aborts_on_empty_input(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Empty answer at the group-selection prompt aborts cleanly."""
     captures = _fake_capture_for_action(
         awx_outputs={
             ("mgmt", "ss900770x4200980"): (_awx_with_code(), 0),
@@ -303,23 +304,22 @@ def test_main_view_sku_action_without_yes_prompts_and_aborts_on_no(
     )
     monkeypatch.setattr("frops.cli.capture_command", captures)
     monkeypatch.setattr("frops.cli.run_command", lambda _cmd: 0)
-    monkeypatch.setattr("builtins.input", lambda _prompt: "n")
+    monkeypatch.setattr("builtins.input", lambda _prompt: "")
 
     rc = main(["view", "sku", "GPU-GH200-01", "--action"])
     out = capsys.readouterr().out
     assert rc == 0
-    # Plan rendered…
     assert "=== Planned actions ===" in out
     assert "[power-drain] 1 node(s)" in out
-    # …user said no → execution skipped, no execution summary printed.
     assert "Aborted by user" in out
     assert "=== Execution summary ===" not in out
 
 
-def test_main_view_sku_action_without_yes_executes_on_y(
+def test_main_view_sku_action_without_yes_executes_on_all_selection(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """`a` at the prompt picks every available group (power-drain here)."""
     captures = _fake_capture_for_action(
         awx_outputs={
             ("mgmt", "ss900770x4200980"): (_awx_with_code(), 0),
@@ -329,18 +329,15 @@ def test_main_view_sku_action_without_yes_executes_on_y(
     monkeypatch.setattr("frops.cli.capture_command", captures)
 
     run_calls: list[str] = []
-
-    def _run(cmd: str) -> int:
-        run_calls.append(cmd)
-        return 0
-
-    monkeypatch.setattr("frops.cli.run_command", _run)
-    monkeypatch.setattr("builtins.input", lambda _prompt: "y")
+    monkeypatch.setattr(
+        "frops.cli.run_command",
+        lambda cmd: run_calls.append(cmd) or 0,  # type: ignore[func-returns-value]
+    )
+    monkeypatch.setattr("builtins.input", lambda _prompt: "a")
 
     rc = main(["view", "sku", "GPU-GH200-01", "--action"])
     out = capsys.readouterr().out
     assert rc == 0
-    # First run_command call is the wide kubectl view; cwctl calls follow.
     assert any(
         "cwctl flcc node --one-off" in c and "power-drain ss900770x4200980" in c for c in run_calls
     ), run_calls
@@ -482,11 +479,13 @@ def test_main_view_sku_action_yes_reports_worst_rc_on_partial_failure(
     assert "exit 5" in out
 
 
-def test_main_view_sku_action_yes_with_only_noops_skips_execution(
+def test_main_view_sku_action_yes_with_only_noops_runs_access_check(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # No CW codes in either awxstat output → classifier returns NOOP.
+    """With --yes and NOOP-clean BMNs only, access check fires (it's part
+    of 'all'); no cwctl actions run because nothing is actionable."""
+    # No CW codes in either awxstat output → classifier returns NOOP-clean.
     captures = _fake_capture_for_action(
         awx_outputs={
             ("mgmt", "ss900770x4200980"): ("cw_error_codes={}\n", 0),
@@ -500,15 +499,17 @@ def test_main_view_sku_action_yes_with_only_noops_skips_execution(
         "frops.cli.run_command",
         lambda cmd: run_calls.append(cmd) or 0,  # type: ignore[func-returns-value]
     )
-    # Input must not be called even without --yes when there's nothing actionable.
     monkeypatch.setattr("builtins.input", _input_should_not_be_called)
 
     rc = main(["view", "sku", "GPU-GH200-01", "--action", "--yes"])
     out = capsys.readouterr().out
     assert rc == 0
-    # Only the wide kubectl view runs — no cwctl follow-ups.
+    # Only the wide kubectl view streams; no cwctl follow-ups.
     assert len(run_calls) == 1
-    assert "Nothing actionable to execute" in out
+    # Access check IS run under --yes when NOOP-clean targets exist.
+    assert "=== Access check (NOOP nodes without CW codes) ===" in out
+    # No execution summary because no actionable cwctl commands ran.
+    assert "=== Execution summary ===" not in out
 
 
 def test_main_yes_without_action_is_rejected(
@@ -715,12 +716,12 @@ def _fake_bmns_wide_for(bmn: str, ts: str = "10m") -> str:
     return f"NAME    STATE  TS\n{bmn}  fail   {ts}\n"
 
 
-def test_main_view_sku_action_runs_access_check_for_noop_no_codes(
+def test_main_view_sku_action_runs_access_check_when_noop_selected(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """NOOP-no-codes BMN should trigger jumpipmitool + bmns-wide via the
-    access pass; results render in the post-plan summary."""
+    """Picking `n` at the group-selection prompt fires jumpipmitool +
+    bmns-wide for NOOP-no-codes BMNs and renders the access summary."""
     monkeypatch.delenv("JIRA_EMAIL", raising=False)
     monkeypatch.delenv("JIRA_TOKEN", raising=False)
 
@@ -730,7 +731,6 @@ def test_main_view_sku_action_runs_access_check_for_noop_no_codes(
         seen.append(cmd)
         if "-o json" in cmd:
             return (_NOOP_BMN_JSON, 0)
-        # awxstat — return zero codes so the BMN classifies as NOOP-no-codes.
         if cmd.startswith("awxstat"):
             return ("cw_error_codes={}\n", 0)
         if cmd.startswith("jumpipmitool"):
@@ -741,24 +741,53 @@ def test_main_view_sku_action_runs_access_check_for_noop_no_codes(
 
     monkeypatch.setattr("frops.cli.capture_command", _capture)
     monkeypatch.setattr("frops.cli.run_command", lambda _cmd: 0)
+    monkeypatch.setattr("builtins.input", lambda _prompt: "n")
 
     rc = main(["view", "sku", "GPU-GH200-01", "--action"])
     out = capsys.readouterr().out
     assert rc == 0
 
-    # Access pass invoked: one jumpipmitool + one bmns-wide for the NOOP BMN.
     assert any(
         c.startswith('jumpipmitool -c "chassis power status" ss900770x4200980') for c in seen
     ), seen
     assert any(c == "bmns -o wide ss900770x4200980" for c in seen), seen
 
-    # Summary surfaces in the rendered output with the BMN's workflow/state/TS.
     assert "=== Access check (NOOP nodes without CW codes) ===" in out
     assert "Checked 1 node(s): 1 reachable, 0 unreachable." in out
     for token in ("ss900770x4200980", "g826cb0", "provision-v2", "fail", "10m"):
         assert token in out
-    # Nothing actionable since the only BMN is NOOP — no prompt, no execution.
-    assert "Nothing actionable to execute" in out
+
+
+def test_main_view_sku_action_skips_access_check_when_noop_not_selected(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Empty answer at the prompt aborts everything — including the access
+    check (it's now gated by `n`, not run unconditionally)."""
+    monkeypatch.delenv("JIRA_EMAIL", raising=False)
+    monkeypatch.delenv("JIRA_TOKEN", raising=False)
+
+    seen: list[str] = []
+
+    def _capture(cmd: str) -> tuple[str, int]:
+        seen.append(cmd)
+        if "-o json" in cmd:
+            return (_NOOP_BMN_JSON, 0)
+        if cmd.startswith("awxstat"):
+            return ("cw_error_codes={}\n", 0)
+        return ("", 0)
+
+    monkeypatch.setattr("frops.cli.capture_command", _capture)
+    monkeypatch.setattr("frops.cli.run_command", lambda _cmd: 0)
+    monkeypatch.setattr("builtins.input", lambda _prompt: "")
+
+    rc = main(["view", "sku", "GPU-GH200-01", "--action"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert not any(c.startswith("jumpipmitool") for c in seen), seen
+    assert not any(c.startswith("bmns -o wide") for c in seen), seen
+    assert "=== Access check" not in out
+    assert "Aborted by user" in out
 
 
 def test_main_view_sku_action_skips_access_check_when_no_noop_clean_bmns(
@@ -794,6 +823,128 @@ def test_main_view_sku_action_skips_access_check_when_no_noop_clean_bmns(
     assert not any(c.startswith("jumpipmitool") for c in seen), seen
     assert not any(c.startswith("bmns -o wide") for c in seen), seen
     assert "=== Access check" not in out
+
+
+# ----------------------------- group selection (multi-pick) ----------------
+
+
+_TWO_BMN_PD_HO_JSON = json.dumps(
+    {
+        "items": [
+            {
+                "metadata": {
+                    "name": "bmn-pd",
+                    "labels": {"ds.coreweave.com/sku.cw-sku": "GPU-GH200-01"},
+                },
+                "status": {"reportedNodeInfo": {"nodeName": "g-pd"}},
+            },
+            {
+                "metadata": {
+                    "name": "bmn-ho",
+                    "labels": {"ds.coreweave.com/sku.cw-sku": "GPU-GH200-01"},
+                },
+                "status": {"reportedNodeInfo": {"nodeName": "g-ho"}},
+            },
+        ]
+    }
+)
+
+
+def _capture_two_bmn_pd_ho() -> Callable[[str], tuple[str, int]]:
+    """One BMN with CW0211 (power-drain), one with CW0201 (ho-ticket)."""
+
+    def _cap(cmd: str) -> tuple[str, int]:
+        if "-o json" in cmd:
+            return (_TWO_BMN_PD_HO_JSON, 0)
+        if cmd.startswith("awxstat") and "bmn-pd" in cmd:
+            return (
+                "Job Status: failed\ncw_error_codes={\n  CW0211: x\n}\n",
+                0,
+            )
+        if cmd.startswith("awxstat") and "bmn-ho" in cmd:
+            return (
+                "Job Status: failed\ncw_error_codes={\n  CW0201: y\n}\n",
+                0,
+            )
+        return ("", 0)
+
+    return _cap
+
+
+def test_main_view_sku_action_selecting_p_only_skips_ho_ticket(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`p` at the prompt runs power-drain; ho-ticket fallback is skipped."""
+    monkeypatch.delenv("JIRA_EMAIL", raising=False)
+    monkeypatch.delenv("JIRA_TOKEN", raising=False)
+    monkeypatch.setattr("frops.cli.capture_command", _capture_two_bmn_pd_ho())
+
+    run_calls: list[str] = []
+    monkeypatch.setattr(
+        "frops.cli.run_command",
+        lambda cmd: run_calls.append(cmd) or 0,  # type: ignore[func-returns-value]
+    )
+    monkeypatch.setattr("builtins.input", lambda _p: "p")
+
+    rc = main(["view", "sku", "GPU-GH200-01", "--action"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    # Power-drain executed for bmn-pd; ho-ticket return-to-triage NOT executed.
+    assert any("power-drain bmn-pd" in c for c in run_calls), run_calls
+    assert not any("return-to-triage bmn-ho" in c for c in run_calls), run_calls
+    assert "=== Execution summary ===" in out
+    assert "1 succeeded, 0 failed" in out
+
+
+def test_main_view_sku_action_selecting_p_h_combo_runs_both(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`p,h` at the prompt picks both groups."""
+    monkeypatch.delenv("JIRA_EMAIL", raising=False)
+    monkeypatch.delenv("JIRA_TOKEN", raising=False)
+    monkeypatch.setattr("frops.cli.capture_command", _capture_two_bmn_pd_ho())
+
+    run_calls: list[str] = []
+    monkeypatch.setattr(
+        "frops.cli.run_command",
+        lambda cmd: run_calls.append(cmd) or 0,  # type: ignore[func-returns-value]
+    )
+    monkeypatch.setattr("builtins.input", lambda _p: "p,h")
+
+    rc = main(["view", "sku", "GPU-GH200-01", "--action"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert any("power-drain bmn-pd" in c for c in run_calls), run_calls
+    assert any("return-to-triage bmn-ho" in c for c in run_calls), run_calls
+    assert "2 succeeded, 0 failed" in out
+
+
+def test_main_view_sku_action_unknown_letters_are_silently_ignored(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Letters that don't map to an offered group are dropped; if the
+    remaining selection is empty the run aborts."""
+    monkeypatch.delenv("JIRA_EMAIL", raising=False)
+    monkeypatch.delenv("JIRA_TOKEN", raising=False)
+    monkeypatch.setattr("frops.cli.capture_command", _capture_two_bmn_pd_ho())
+
+    run_calls: list[str] = []
+    monkeypatch.setattr(
+        "frops.cli.run_command",
+        lambda cmd: run_calls.append(cmd) or 0,  # type: ignore[func-returns-value]
+    )
+    # "z,x" — neither matches any offered letter. Result: empty selection → abort.
+    monkeypatch.setattr("builtins.input", lambda _p: "z,x")
+
+    rc = main(["view", "sku", "GPU-GH200-01", "--action"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "Aborted by user" in out
+    # No cwctl commands beyond the original kubectl wide view.
+    assert all("cwctl" not in c for c in run_calls), run_calls
 
 
 def test_main_view_sku_action_yes_dry_run_mentions_execute_intent(

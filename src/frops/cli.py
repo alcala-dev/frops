@@ -400,6 +400,7 @@ def _build_targets(
         sku = labels.get("ds.coreweave.com/sku.cw-sku", default_sku)
         serial = labels.get("ds.coreweave.com/status.asset.serial", "")
         workflow = labels.get("flcc.coreweave.com/workflow", "")
+        workflow_step = labels.get("flcc.coreweave.com/workflow-step", "")
         state = labels.get("flcc.coreweave.com/state", "")
 
         reports = _collect_awx_reports(bmn_name)
@@ -411,6 +412,7 @@ def _build_targets(
                 awx_reports=tuple(reports),
                 serial=serial,
                 workflow=workflow,
+                workflow_step=workflow_step,
                 state=state,
             )
         )

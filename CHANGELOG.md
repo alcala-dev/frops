@@ -22,6 +22,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   NOOP-clean targets exist.
 
 ### Added
+- `WORKFLOW-STEP` column in the `--action` access-check table, between
+  `WORKFLOW` and `STATE`. Sourced from
+  `flcc.coreweave.com/workflow-step` label on the BMN. New
+  `BMNTarget.workflow_step` field carries it from `_build_targets` into
+  `AccessReport.workflow_step` for rendering.
 - `frops view sku <SKU> --action` access check: BMNs that classify as
   NOOP with zero detected CW codes (i.e. no AWX failure to act on) are
   now probed via `jumpipmitool -c "chassis power status" <BMN>` and

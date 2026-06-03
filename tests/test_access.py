@@ -21,6 +21,7 @@ def _target(
     bmn: str = "ss900770x4200980",
     cw_node: str = "g81b512",
     workflow: str = "broken-collect",
+    workflow_step: str = "collect",
     state: str = "fail",
 ) -> BMNTarget:
     return BMNTarget(
@@ -30,6 +31,7 @@ def _target(
         awx_reports=(),
         serial="",
         workflow=workflow,
+        workflow_step=workflow_step,
         state=state,
     )
 
@@ -147,6 +149,7 @@ def test_check_access_marks_reachable_on_zero_exit() -> None:
     assert report.detail == "Chassis Power is on"
     assert report.ts == "10m"
     assert report.workflow == "broken-collect"
+    assert report.workflow_step == "collect"
     assert report.state == "fail"
     assert report.bmn == target.bmn
 
@@ -166,13 +169,14 @@ def test_check_access_marks_unreachable_on_non_zero_exit() -> None:
 
 
 def test_check_access_substitutes_unknown_for_empty_workflow_state() -> None:
-    target = _target(workflow="", state="")
+    target = _target(workflow="", workflow_step="", state="")
 
     def _capture(_cmd: str) -> tuple[str, int]:
         return ("Chassis Power is on\n", 0)
 
     report = check_access(target, _capture)
     assert report.workflow == "(unknown)"
+    assert report.workflow_step == "(unknown)"
     assert report.state == "(unknown)"
 
 
@@ -227,6 +231,7 @@ def test_render_access_summary_shows_header_table_and_counts() -> None:
             bmn="bmn-a",
             cw_node="g-a",
             workflow="provision-v2",
+            workflow_step="dpu-vaultify",
             state="fail",
             ts="10m",
             reachable=True,
@@ -236,6 +241,7 @@ def test_render_access_summary_shows_header_table_and_counts() -> None:
             bmn="bmn-b",
             cw_node="g-b",
             workflow="broken-collect",
+            workflow_step="collect",
             state="fail",
             ts="2h",
             reachable=False,
@@ -246,11 +252,12 @@ def test_render_access_summary_shows_header_table_and_counts() -> None:
     assert "=== Access check (NOOP nodes without CW codes) ===" in rendered
     assert "Checked 2 node(s): 1 reachable, 1 unreachable." in rendered
     # Header tokens present
-    for token in ("BMN", "CW-NODE", "WORKFLOW", "STATE", "TS", "REACH"):
+    for token in ("BMN", "CW-NODE", "WORKFLOW", "WORKFLOW-STEP", "STATE", "TS", "REACH"):
         assert token in rendered
-    # Data values present
-    for value in ("bmn-a", "g-a", "provision-v2", "fail", "10m"):
+    # Data values present (incl. new workflow-step value)
+    for value in ("bmn-a", "g-a", "provision-v2", "dpu-vaultify", "fail", "10m"):
         assert value in rendered
+    assert "collect" in rendered  # second row's workflow-step
     # Unreachable detail surfaces; clean "Chassis Power is on" does NOT show
     # a redundant detail line (only odd output gets the ↳ annotation).
     assert "RMCP+ session timeout" in rendered
@@ -267,6 +274,7 @@ def test_render_access_summary_shows_detail_for_chassis_power_off() -> None:
             bmn="bmn-off",
             cw_node="g-off",
             workflow="wf",
+            workflow_step="step",
             state="fail",
             ts="1d",
             reachable=True,

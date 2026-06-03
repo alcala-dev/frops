@@ -38,6 +38,7 @@ class AccessReport:
     bmn: str
     cw_node: str
     workflow: str
+    workflow_step: str
     state: str
     ts: str  # `bmns -o wide` formatted duration, e.g. "10m" / "2h" / "3d"
     reachable: bool
@@ -81,6 +82,7 @@ def check_access(target: BMNTarget, capture: CaptureFn) -> AccessReport:
         bmn=target.bmn,
         cw_node=target.cw_node,
         workflow=target.workflow or "(unknown)",
+        workflow_step=target.workflow_step or "(unknown)",
         state=target.state or "(unknown)",
         ts=ts,
         reachable=reachable,
@@ -121,6 +123,7 @@ def render_access_summary(reports: list[AccessReport]) -> str:
         ("BMN", [r.bmn for r in reports]),
         ("CW-NODE", [r.cw_node for r in reports]),
         ("WORKFLOW", [r.workflow for r in reports]),
+        ("WORKFLOW-STEP", [r.workflow_step for r in reports]),
         ("STATE", [r.state for r in reports]),
         ("TS", [r.ts for r in reports]),
         ("REACH", ["yes" if r.reachable else "no" for r in reports]),

@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from frops import __version__
+from frops.access import access_check_targets, check_all, render_access_summary
 from frops.action import (
     ActionKind,
     BMNTarget,
@@ -196,6 +197,17 @@ def _run_sku_action_plan(sku: str, user_filter: str | None, *, auto_yes: bool = 
     print()
     print(render_plan(actions))
 
+    # Diagnostic access pass for NOOP nodes with no CW codes — they're not
+    # planned for action, but a BMC unreachability check often explains why
+    # the node is stuck (offline at the hardware level vs a software issue).
+    # Runs regardless of `--yes` since it's read-only; failures don't
+    # affect the process exit code.
+    access_targets = access_check_targets(actions, targets_by_bmn)
+    if access_targets:
+        access_reports = check_all(access_targets, capture_command)
+        print()
+        print(render_access_summary(access_reports))
+
     actionable = actionable_actions(actions)
     if not actionable:
         print("\nNothing actionable to execute.")
@@ -314,6 +326,8 @@ def _build_targets(
         labels = metadata.get("labels") or {}
         sku = labels.get("ds.coreweave.com/sku.cw-sku", default_sku)
         serial = labels.get("ds.coreweave.com/status.asset.serial", "")
+        workflow = labels.get("flcc.coreweave.com/workflow", "")
+        state = labels.get("flcc.coreweave.com/state", "")
 
         reports = _collect_awx_reports(bmn_name)
         targets.append(
@@ -323,6 +337,8 @@ def _build_targets(
                 sku=sku,
                 awx_reports=tuple(reports),
                 serial=serial,
+                workflow=workflow,
+                state=state,
             )
         )
 

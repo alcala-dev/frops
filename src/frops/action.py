@@ -59,6 +59,11 @@ class BMNTarget:
     sku: str
     awx_reports: tuple[AWXReport, ...]
     serial: str = ""
+    # Pulled from `flcc.coreweave.com/workflow` / `…/state` labels in the
+    # initial kubectl JSON fetch. Empty when the label is absent. Used by
+    # the access-check pass to enrich NOOP-no-code diagnostic output.
+    workflow: str = ""
+    state: str = ""
 
     @property
     def search_identifiers(self) -> tuple[str, ...]:

@@ -267,7 +267,7 @@ def _fake_capture_for_action(
 ) -> Callable[[str], tuple[str, int]]:
     """Build a capture_command stand-in keyed by (limit_type, bmn) or 'json'."""
 
-    def _capture(cmd: str) -> tuple[str, int]:
+    def _capture(cmd: str, **_kwargs: object) -> tuple[str, int]:
         if "-o json" in cmd:
             return json_output
         # awxstat -l <type> <BMN>
@@ -351,7 +351,7 @@ def test_main_view_sku_action_dry_run_skips_action_pipeline(
 ) -> None:
     capture_calls: list[str] = []
 
-    def _capture(cmd: str) -> tuple[str, int]:
+    def _capture(cmd: str, **_kwargs: object) -> tuple[str, int]:
         capture_calls.append(cmd)
         return ("", 0)
 
@@ -762,7 +762,7 @@ def test_main_view_sku_action_renders_missing_cwnode_section_and_includes_in_acc
 
     seen: list[str] = []
 
-    def _capture(cmd: str) -> tuple[str, int]:
+    def _capture(cmd: str, **_kwargs: object) -> tuple[str, int]:
         seen.append(cmd)
         if "-o json" in cmd:
             return (_MIXED_BMN_JSON, 0)
@@ -817,7 +817,7 @@ def test_main_view_sku_action_runs_access_check_when_noop_selected(
 
     seen: list[str] = []
 
-    def _capture(cmd: str) -> tuple[str, int]:
+    def _capture(cmd: str, **_kwargs: object) -> tuple[str, int]:
         seen.append(cmd)
         if "-o json" in cmd:
             return (_NOOP_BMN_JSON, 0)
@@ -866,7 +866,7 @@ def test_main_view_sku_action_skips_access_check_when_noop_not_selected(
 
     seen: list[str] = []
 
-    def _capture(cmd: str) -> tuple[str, int]:
+    def _capture(cmd: str, **_kwargs: object) -> tuple[str, int]:
         seen.append(cmd)
         if "-o json" in cmd:
             return (_NOOP_BMN_JSON, 0)
@@ -897,7 +897,7 @@ def test_main_view_sku_action_skips_access_check_when_no_noop_clean_bmns(
 
     seen: list[str] = []
 
-    def _capture(cmd: str) -> tuple[str, int]:
+    def _capture(cmd: str, **_kwargs: object) -> tuple[str, int]:
         seen.append(cmd)
         if "-o json" in cmd:
             return (_NOOP_BMN_JSON, 0)

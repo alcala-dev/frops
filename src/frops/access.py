@@ -24,9 +24,15 @@ from dataclasses import dataclass
 from frops.action import ActionKind, BMNTarget, PlannedAction
 
 # (stdout, rc) — matches frops.commands.capture_command's contract.
-CaptureFn = Callable[[str], tuple[str, int]]
+# Variadic so callers can pass `timeout=<seconds>` without breaking tests
+# that ship a 1-arg fake capture.
+CaptureFn = Callable[..., tuple[str, int]]
 
 DEFAULT_MAX_WORKERS: int = 8
+# Per-call wall clock for the BMC reachability probe. Unreachable BMCs
+# typically wedge on the IPMI handshake; without a ceiling a single
+# offline node can stall the whole pass for minutes.
+IPMI_TIMEOUT_SECONDS: float = 20.0
 IPMI_TEMPLATE: str = 'jumpipmitool -c "chassis power status" {bmn}'
 BMNS_WIDE_TEMPLATE: str = "bmns -o wide {bmn}"
 
@@ -68,12 +74,24 @@ def access_check_targets(
 
 
 def check_access(target: BMNTarget, capture: CaptureFn) -> AccessReport:
-    """Run jumpipmitool + bmns-wide for one BMN, return a combined report."""
-    ipmi_out, ipmi_rc = capture(IPMI_TEMPLATE.format(bmn=target.bmn))
-    reachable = ipmi_rc == 0
-    detail = _first_useful_line(ipmi_out) or (
-        "(no ipmitool output)" if reachable else f"exit {ipmi_rc}"
+    """Run jumpipmitool + bmns-wide for one BMN, return a combined report.
+
+    The IPMI call is capped at IPMI_TIMEOUT_SECONDS. When the timeout fires,
+    capture_command returns rc=124 (GNU `timeout` convention); we surface
+    that as an explicit "timed out after Ns" detail so operators can tell
+    a timeout apart from other failure modes.
+    """
+    ipmi_out, ipmi_rc = capture(
+        IPMI_TEMPLATE.format(bmn=target.bmn),
+        timeout=IPMI_TIMEOUT_SECONDS,
     )
+    reachable = ipmi_rc == 0
+    if ipmi_rc == 124:
+        detail = f"timed out after {int(IPMI_TIMEOUT_SECONDS)}s"
+    else:
+        detail = _first_useful_line(ipmi_out) or (
+            "(no ipmitool output)" if reachable else f"exit {ipmi_rc}"
+        )
 
     bmns_out, _ = capture(BMNS_WIDE_TEMPLATE.format(bmn=target.bmn))
     ts = _extract_ts(bmns_out)

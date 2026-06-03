@@ -140,7 +140,7 @@ def test_first_useful_line_caps_length() -> None:
 def test_check_access_marks_reachable_on_zero_exit() -> None:
     target = _target()
 
-    def _capture(cmd: str) -> tuple[str, int]:
+    def _capture(cmd: str, **_kwargs: object) -> tuple[str, int]:
         if cmd.startswith("jumpipmitool"):
             return ("Chassis Power is on\n", 0)
         return (_BMNS_WIDE_OUTPUT, 0)
@@ -159,7 +159,7 @@ def test_check_access_marks_unreachable_on_non_zero_exit() -> None:
     target = _target(bmn="dead-bmn")
     error_text = "Get Chassis Power Status failed: Unable to establish IPMI v2 / RMCP+ session\n"
 
-    def _capture(cmd: str) -> tuple[str, int]:
+    def _capture(cmd: str, **_kwargs: object) -> tuple[str, int]:
         if cmd.startswith("jumpipmitool"):
             return (error_text, 1)
         return (_BMNS_WIDE_OUTPUT, 0)
@@ -172,7 +172,7 @@ def test_check_access_marks_unreachable_on_non_zero_exit() -> None:
 def test_check_access_substitutes_unknown_for_empty_workflow_state() -> None:
     target = _target(workflow="", workflow_step="", state="")
 
-    def _capture(_cmd: str) -> tuple[str, int]:
+    def _capture(_cmd: str, **_kwargs: object) -> tuple[str, int]:
         return ("Chassis Power is on\n", 0)
 
     report = check_access(target, _capture)
@@ -184,7 +184,7 @@ def test_check_access_substitutes_unknown_for_empty_workflow_state() -> None:
 def test_check_access_falls_back_to_exit_code_when_no_output() -> None:
     target = _target()
 
-    def _capture(cmd: str) -> tuple[str, int]:
+    def _capture(cmd: str, **_kwargs: object) -> tuple[str, int]:
         if cmd.startswith("jumpipmitool"):
             return ("", 7)
         return (_BMNS_WIDE_OUTPUT, 0)
@@ -194,6 +194,43 @@ def test_check_access_falls_back_to_exit_code_when_no_output() -> None:
     assert report.detail == "exit 7"
 
 
+def test_check_access_passes_timeout_to_ipmi_call() -> None:
+    """check_access must request a wall-clock timeout for jumpipmitool so a
+    hung BMC can't stall the whole pass. bmns -o wide is best-effort and
+    runs without an explicit timeout from this layer."""
+    from frops.access import IPMI_TIMEOUT_SECONDS
+
+    target = _target()
+    seen: list[tuple[str, object]] = []
+
+    def _capture(cmd: str, **kwargs: object) -> tuple[str, int]:
+        seen.append((cmd, kwargs.get("timeout")))
+        if cmd.startswith("jumpipmitool"):
+            return ("Chassis Power is on\n", 0)
+        return (_BMNS_WIDE_OUTPUT, 0)
+
+    check_access(target, _capture)
+    ipmi_call = next(c for c in seen if c[0].startswith("jumpipmitool"))
+    bmns_call = next(c for c in seen if c[0].startswith("bmns -o wide"))
+    assert ipmi_call[1] == IPMI_TIMEOUT_SECONDS
+    assert bmns_call[1] is None
+
+
+def test_check_access_marks_unreachable_on_timeout() -> None:
+    """rc=124 (GNU `timeout` convention from capture_command) → unreachable,
+    with a clear `timed out after Ns` detail rather than the partial output."""
+    target = _target()
+
+    def _capture(cmd: str, **_kwargs: object) -> tuple[str, int]:
+        if cmd.startswith("jumpipmitool"):
+            return ("partial stdout\n(timed out after 20s)", 124)
+        return (_BMNS_WIDE_OUTPUT, 0)
+
+    report = check_access(target, _capture)
+    assert report.reachable is False
+    assert report.detail == "timed out after 20s"
+
+
 # --------------------------- check_all --------------------------------------
 
 
@@ -201,7 +238,7 @@ def test_check_all_runs_each_target_and_sorts_by_bmn() -> None:
     targets = [_target(bmn=name) for name in ("zeta", "alpha", "mu")]
     seen: list[str] = []
 
-    def _capture(cmd: str) -> tuple[str, int]:
+    def _capture(cmd: str, **_kwargs: object) -> tuple[str, int]:
         seen.append(cmd)
         if cmd.startswith("jumpipmitool"):
             return ("Chassis Power is on\n", 0)

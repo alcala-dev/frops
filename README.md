@@ -83,20 +83,31 @@ The excluded states are `production`, `ready`, `rma`, `broken`, `dev`,
 
 `frops view sku <SKU> --action` shows the existing colored table, then
 inspects each returned BMN's AWX jobs and prints a per-node remediation
-plan. By default it stops there and asks `Run these? [y/N]`; passing
-`--yes` (or `-y`) skips the prompt and executes immediately. Use
-`--dry-run` if you want the plan without any prompt or execution.
+plan. By default it stops there and asks you to pick which group(s) to
+run; passing `--yes` (or `-y`) skips the prompt and runs every available
+group. Use `--dry-run` if you want the plan without any prompt or
+execution.
 
 ```bash
-# Plan only, then prompt — answer 'y' to execute, anything else to abort
+# Plan only, then prompt for which groups to run
 frops view sku GPU-GH200-01 --action
 
-# Plan and execute without prompting (CI / scripted use)
+# Plan and run everything available without prompting (CI / scripted use)
 frops view sku GPU-GH200-01 --action --yes
 
 # Plan only, never prompt or execute
 frops --dry-run view sku GPU-GH200-01 --action
 ```
+
+The prompt looks like:
+
+```text
+Run?  [a]ll  /  [p]ower-drain (3)  /  [h]o-ticket (1)  /  [n]oop-access (6)  /  Enter to abort:
+```
+
+Only groups present in the plan are offered. Pick one letter, or several
+comma-separated (`p,h` runs power-drain + ho-ticket but skips the NOOP
+access check). Empty input — or Ctrl-C — aborts; nothing runs.
 
 What `--action` does, per BMN with a non-empty `CW-NODE`:
 
@@ -111,20 +122,22 @@ What `--action` does, per BMN with a non-empty `CW-NODE`:
      status block to that ticket's Description". If nothing matches (or
      JIRA creds aren't set), falls back to
      `cwctl flcc node -w return-to-triage …`.
-   - Other / no codes → no-op.
+   - Other / no codes → no-op (eligible for the access check).
 4. Prints a grouped plan with the exact commands that would run and a
    totals line.
-5. For BMNs that classified as NOOP with **no detected CW codes**, runs
-   a diagnostic access pass — `jumpipmitool -c "chassis power status"`
-   per node, plus `bmns -o wide` for the canonical workflow / state / TS
-   display — and prints an `=== Access check ===` table. Reachability
-   failures are reported but don't affect the process exit code. Runs
-   in parallel (8-thread pool) and is independent of `--yes`.
-6. With `--yes` (or after a yes-prompt response): runs each actionable
+5. Prompts you to pick which groups to execute (or with `--yes`, runs
+   every group).
+6. For each selected actionable group (`p` and/or `h`): runs each
    `cwctl` command in order, streaming its output. A failure on one BMN
    does **not** abort the rest — the run continues and the worst exit
    code propagates as the process exit. An `=== Execution summary ===`
    block at the end lists any failures with their `cwctl` exit codes.
+7. If `n` is selected (or under `--yes` when NOOP-clean BMNs exist):
+   runs a diagnostic access pass — `jumpipmitool -c "chassis power
+   status"` per node, plus `bmns -o wide` for the canonical workflow /
+   state / TS display — and prints an `=== Access check ===` table.
+   Reachability failures are reported but don't affect the process exit
+   code. Runs in parallel (8-thread pool).
 
 BMNs without a `CW-NODE` are listed as skipped — there's nothing to
 action on a node that hasn't joined a cluster.

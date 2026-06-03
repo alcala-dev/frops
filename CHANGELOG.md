@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- `frops view sku <SKU> --action` prompt now offers per-group selection
+  via letter shortcuts:
+  `Run? [a]ll / [p]ower-drain (N) / [h]o-ticket (N) / [n]oop-access (N)
+  / Enter to abort`. Only groups present in the plan appear. Multi-pick
+  via comma (`p,h`). Replaces the old `[y/N]` binary prompt.
+- The NOOP access check is now **gated by the `n` selection** at the
+  prompt (or run automatically under `--yes`'s "all" selection). Pre-
+  vious release ran it unconditionally; now it only fires when the
+  operator opts in.
+- `--yes` semantics unchanged in intent — still skips the prompt and
+  selects every available group, including the access check when
+  NOOP-clean targets exist.
+
 ### Added
 - `frops view sku <SKU> --action` access check: BMNs that classify as
   NOOP with zero detected CW codes (i.e. no AWX failure to act on) are

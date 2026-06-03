@@ -8,6 +8,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `frops view sku <SKU> --action` access check: BMNs that classify as
+  NOOP with zero detected CW codes (i.e. no AWX failure to act on) are
+  now probed via `jumpipmitool -c "chassis power status" <BMN>` and
+  enriched with `bmns -o wide` (for the canonical WORKFLOW / STATE / TS
+  display). A new `=== Access check (NOOP nodes without CW codes) ===`
+  table renders after the plan, listing each node with its reachability
+  verdict. Runs regardless of `--yes` (read-only diagnostic) and skips
+  cleanly when there are no NOOP-clean candidates. Failures do not
+  affect the process exit code. Checks run in a thread pool (8 workers)
+  so a large NOOP list completes quickly.
+- New module `frops.access` (`AccessReport`, `check_access`,
+  `check_all`, `access_check_targets`, `render_access_summary`) — pure,
+  dependency-injected on a `capture` callable so tests don't spawn
+  subprocesses.
+- `BMNTarget.workflow` and `BMNTarget.state` (sourced from
+  `flcc.coreweave.com/workflow` and `…/state` labels) populated by
+  `_build_targets` so the access pass has the data without a second
+  kubectl round-trip.
 - `frops view sku <SKU> --action` HO-ticket resolution: when a `CW0201`
   BMN has a matching JIRA HO ticket in `Awaiting Support`, the planner
   appends a status block to the ticket's Description instead of running

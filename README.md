@@ -114,7 +114,13 @@ What `--action` does, per BMN with a non-empty `CW-NODE`:
    - Other / no codes → no-op.
 4. Prints a grouped plan with the exact commands that would run and a
    totals line.
-5. With `--yes` (or after a yes-prompt response): runs each actionable
+5. For BMNs that classified as NOOP with **no detected CW codes**, runs
+   a diagnostic access pass — `jumpipmitool -c "chassis power status"`
+   per node, plus `bmns -o wide` for the canonical workflow / state / TS
+   display — and prints an `=== Access check ===` table. Reachability
+   failures are reported but don't affect the process exit code. Runs
+   in parallel (8-thread pool) and is independent of `--yes`.
+6. With `--yes` (or after a yes-prompt response): runs each actionable
    `cwctl` command in order, streaming its output. A failure on one BMN
    does **not** abort the rest — the run continues and the worst exit
    code propagates as the process exit. An `=== Execution summary ===`

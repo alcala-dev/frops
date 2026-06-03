@@ -689,6 +689,113 @@ def test_main_view_sku_action_continues_without_jira_when_creds_missing(
     assert any("return-to-triage ss900770x4200980" in c for c in run_calls)
 
 
+# ----------------------------- view sku --action access check ---------------
+
+
+_NOOP_BMN_JSON = json.dumps(
+    {
+        "items": [
+            {
+                "metadata": {
+                    "name": "ss900770x4200980",
+                    "labels": {
+                        "ds.coreweave.com/sku.cw-sku": "GPU-GH200-01",
+                        "flcc.coreweave.com/workflow": "provision-v2",
+                        "flcc.coreweave.com/state": "fail",
+                    },
+                },
+                "status": {"reportedNodeInfo": {"nodeName": "g826cb0"}},
+            }
+        ]
+    }
+)
+
+
+def _fake_bmns_wide_for(bmn: str, ts: str = "10m") -> str:
+    return f"NAME    STATE  TS\n{bmn}  fail   {ts}\n"
+
+
+def test_main_view_sku_action_runs_access_check_for_noop_no_codes(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """NOOP-no-codes BMN should trigger jumpipmitool + bmns-wide via the
+    access pass; results render in the post-plan summary."""
+    monkeypatch.delenv("JIRA_EMAIL", raising=False)
+    monkeypatch.delenv("JIRA_TOKEN", raising=False)
+
+    seen: list[str] = []
+
+    def _capture(cmd: str) -> tuple[str, int]:
+        seen.append(cmd)
+        if "-o json" in cmd:
+            return (_NOOP_BMN_JSON, 0)
+        # awxstat — return zero codes so the BMN classifies as NOOP-no-codes.
+        if cmd.startswith("awxstat"):
+            return ("cw_error_codes={}\n", 0)
+        if cmd.startswith("jumpipmitool"):
+            return ("Chassis Power is on\n", 0)
+        if cmd.startswith("bmns -o wide"):
+            return (_fake_bmns_wide_for("ss900770x4200980", ts="10m"), 0)
+        return ("", 0)
+
+    monkeypatch.setattr("frops.cli.capture_command", _capture)
+    monkeypatch.setattr("frops.cli.run_command", lambda _cmd: 0)
+
+    rc = main(["view", "sku", "GPU-GH200-01", "--action"])
+    out = capsys.readouterr().out
+    assert rc == 0
+
+    # Access pass invoked: one jumpipmitool + one bmns-wide for the NOOP BMN.
+    assert any(
+        c.startswith('jumpipmitool -c "chassis power status" ss900770x4200980') for c in seen
+    ), seen
+    assert any(c == "bmns -o wide ss900770x4200980" for c in seen), seen
+
+    # Summary surfaces in the rendered output with the BMN's workflow/state/TS.
+    assert "=== Access check (NOOP nodes without CW codes) ===" in out
+    assert "Checked 1 node(s): 1 reachable, 0 unreachable." in out
+    for token in ("ss900770x4200980", "g826cb0", "provision-v2", "fail", "10m"):
+        assert token in out
+    # Nothing actionable since the only BMN is NOOP — no prompt, no execution.
+    assert "Nothing actionable to execute" in out
+
+
+def test_main_view_sku_action_skips_access_check_when_no_noop_clean_bmns(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """BMN with a power-drain code (no NOOP-clean candidates) → no access pass."""
+    monkeypatch.delenv("JIRA_EMAIL", raising=False)
+    monkeypatch.delenv("JIRA_TOKEN", raising=False)
+
+    seen: list[str] = []
+
+    def _capture(cmd: str) -> tuple[str, int]:
+        seen.append(cmd)
+        if "-o json" in cmd:
+            return (_NOOP_BMN_JSON, 0)
+        if cmd.startswith("awxstat"):
+            return (
+                "Node:  S\nJob Status: failed\ncw_error_codes={\n  CW0211: x\n}\n",
+                0,
+            )
+        # If the access pass were running we'd see these — assert it doesn't.
+        return ("", 0)
+
+    monkeypatch.setattr("frops.cli.capture_command", _capture)
+    monkeypatch.setattr("frops.cli.run_command", lambda _cmd: 0)
+    monkeypatch.setattr("builtins.input", lambda _p: "n")  # decline execution
+
+    rc = main(["view", "sku", "GPU-GH200-01", "--action"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    # No access pass shell-outs ran.
+    assert not any(c.startswith("jumpipmitool") for c in seen), seen
+    assert not any(c.startswith("bmns -o wide") for c in seen), seen
+    assert "=== Access check" not in out
+
+
 def test_main_view_sku_action_yes_dry_run_mentions_execute_intent(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,

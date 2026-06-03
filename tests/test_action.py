@@ -5,8 +5,13 @@ from __future__ import annotations
 from frops.action import (
     ActionKind,
     BMNTarget,
+    ExecutionResult,
+    ExecutionSummary,
     PlannedAction,
+    actionable_actions,
     classify,
+    execute_plan,
+    render_execution_summary,
     render_plan,
 )
 from frops.awx import AWXReport, CWError
@@ -151,3 +156,106 @@ def test_render_plan_includes_command_for_actionable_kinds() -> None:
     ]
     rendered = render_plan(actions)
     assert "command: cwctl ..." in rendered
+
+
+# --------------------------- Phase B: execute_plan --------------------------
+
+
+def _action(
+    *, bmn: str = "a", command: str | None = "cwctl run", kind: ActionKind = ActionKind.POWER_DRAIN
+) -> PlannedAction:
+    return PlannedAction(
+        bmn=bmn,
+        cw_node="g1",
+        sku="GPU-GH200-01",
+        kind=kind,
+        triggering_codes=("CW0211",) if command else (),
+        command=command,
+        notes="",
+    )
+
+
+def test_actionable_actions_drops_noops() -> None:
+    actions = [
+        _action(bmn="a", command="cwctl 1"),
+        _action(bmn="b", command=None, kind=ActionKind.NOOP),
+        _action(bmn="c", command="cwctl 2"),
+    ]
+    actionable = actionable_actions(actions)
+    assert [a.bmn for a in actionable] == ["a", "c"]
+
+
+def test_execute_plan_runs_each_actionable_command_via_runner() -> None:
+    actions = [
+        _action(bmn="a", command="cwctl a"),
+        _action(bmn="b", command="cwctl b"),
+    ]
+    calls: list[str] = []
+
+    def runner(cmd: str) -> int:
+        calls.append(cmd)
+        return 0
+
+    summary = execute_plan(actions, runner)
+    assert calls == ["cwctl a", "cwctl b"]
+    assert len(summary.results) == 2
+    assert all(r.succeeded for r in summary.results)
+    assert summary.worst_rc == 0
+
+
+def test_execute_plan_skips_noops() -> None:
+    actions = [
+        _action(bmn="a", command=None, kind=ActionKind.NOOP),
+        _action(bmn="b", command="cwctl b"),
+    ]
+    calls: list[str] = []
+
+    summary = execute_plan(
+        actions,
+        lambda cmd: calls.append(cmd) or 0,  # type: ignore[func-returns-value]
+    )
+    assert calls == ["cwctl b"]
+    assert [r.action.bmn for r in summary.results] == ["b"]
+
+
+def test_execute_plan_continues_after_failure_and_returns_worst_rc() -> None:
+    actions = [
+        _action(bmn="a", command="cwctl a"),
+        _action(bmn="b", command="cwctl b"),
+        _action(bmn="c", command="cwctl c"),
+    ]
+    # b fails (rc=2), a and c succeed — execution should not abort on b.
+    rcs = iter([0, 2, 0])
+    summary = execute_plan(actions, lambda _cmd: next(rcs))
+    assert [r.rc for r in summary.results] == [0, 2, 0]
+    assert summary.worst_rc == 2
+    assert [r.action.bmn for r in summary.failed] == ["b"]
+    assert [r.action.bmn for r in summary.succeeded] == ["a", "c"]
+
+
+def test_execute_plan_with_no_actions_returns_empty_summary() -> None:
+    summary = execute_plan([], lambda _cmd: 0)
+    assert summary.results == ()
+    assert summary.worst_rc == 0
+    assert summary.failed == ()
+
+
+def test_render_execution_summary_empty() -> None:
+    rendered = render_execution_summary(ExecutionSummary(results=()))
+    assert "no actionable items were executed" in rendered
+
+
+def test_render_execution_summary_lists_failures_only() -> None:
+    summary = ExecutionSummary(
+        results=(
+            ExecutionResult(action=_action(bmn="ok"), rc=0),
+            ExecutionResult(action=_action(bmn="bad", command="cwctl bad"), rc=2),
+        )
+    )
+    rendered = render_execution_summary(summary)
+    assert "Ran 2 action(s): 1 succeeded, 1 failed." in rendered
+    assert "bad" in rendered
+    assert "exit 2" in rendered
+    assert "command: cwctl bad" in rendered
+    # Successful BMN shouldn't be listed individually.
+    assert "  - ok " not in rendered

@@ -281,38 +281,71 @@ def _fake_capture_for_action(
     return _capture
 
 
-def test_main_view_sku_action_classifies_and_prints_plan(
-    capsys: pytest.CaptureFixture[str],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    awx_text = (
+def _awx_with_code(code: str = "CW0211") -> str:
+    return (
         "Node:       S900770X4200980\n"
         "Job Status: failed\n\n"
         "cw_error_codes={\n"
-        "  CW0211: bios attributes missing\n"
+        f"  {code}: a description\n"
         "}\n"
     )
+
+
+def test_main_view_sku_action_without_yes_prompts_and_aborts_on_no(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     captures = _fake_capture_for_action(
         awx_outputs={
-            ("mgmt", "ss900770x4200980"): (awx_text, 0),
+            ("mgmt", "ss900770x4200980"): (_awx_with_code(), 0),
             ("bmc", "ss900770x4200980"): ("cw_error_codes={}\n", 0),
         }
     )
     monkeypatch.setattr("frops.cli.capture_command", captures)
-    # Suppress the display kubectl call.
     monkeypatch.setattr("frops.cli.run_command", lambda _cmd: 0)
+    monkeypatch.setattr("builtins.input", lambda _prompt: "n")
 
     rc = main(["view", "sku", "GPU-GH200-01", "--action"])
     out = capsys.readouterr().out
     assert rc == 0
+    # Plan rendered…
     assert "=== Planned actions ===" in out
     assert "[power-drain] 1 node(s)" in out
-    assert "ss900770x4200980" in out
-    # The CW-NODE-less BMN should be reported as skipped.
-    assert "skipped 1 BMN" in out
-    assert "ss111111x1111111" in out
-    # Phase A guard.
-    assert "Phase A is read-only" in out
+    # …user said no → execution skipped, no execution summary printed.
+    assert "Aborted by user" in out
+    assert "=== Execution summary ===" not in out
+
+
+def test_main_view_sku_action_without_yes_executes_on_y(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captures = _fake_capture_for_action(
+        awx_outputs={
+            ("mgmt", "ss900770x4200980"): (_awx_with_code(), 0),
+            ("bmc", "ss900770x4200980"): ("cw_error_codes={}\n", 0),
+        }
+    )
+    monkeypatch.setattr("frops.cli.capture_command", captures)
+
+    run_calls: list[str] = []
+
+    def _run(cmd: str) -> int:
+        run_calls.append(cmd)
+        return 0
+
+    monkeypatch.setattr("frops.cli.run_command", _run)
+    monkeypatch.setattr("builtins.input", lambda _prompt: "y")
+
+    rc = main(["view", "sku", "GPU-GH200-01", "--action"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    # First run_command call is the wide kubectl view; cwctl calls follow.
+    assert any(
+        "cwctl flcc node --one-off" in c and "power-drain ss900770x4200980" in c for c in run_calls
+    ), run_calls
+    assert "=== Execution summary ===" in out
+    assert "1 succeeded, 0 failed" in out
 
 
 def test_main_view_sku_action_dry_run_skips_action_pipeline(
@@ -366,3 +399,143 @@ def test_main_action_handles_kubectl_json_failure(
     assert rc == 7
     assert "failed to fetch BMN JSON" in err
     assert "forbidden" in err
+
+
+# ----------------------------- view sku --action --yes (Phase B) ------------
+
+
+def _input_should_not_be_called(_prompt: str) -> str:
+    raise AssertionError("--yes must skip the confirmation prompt")
+
+
+def test_main_view_sku_action_yes_executes_without_prompt(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captures = _fake_capture_for_action(
+        awx_outputs={
+            ("mgmt", "ss900770x4200980"): (_awx_with_code(), 0),
+            ("bmc", "ss900770x4200980"): ("cw_error_codes={}\n", 0),
+        }
+    )
+    monkeypatch.setattr("frops.cli.capture_command", captures)
+
+    run_calls: list[str] = []
+    monkeypatch.setattr(
+        "frops.cli.run_command",
+        lambda cmd: run_calls.append(cmd) or 0,  # type: ignore[func-returns-value]
+    )
+    monkeypatch.setattr("builtins.input", _input_should_not_be_called)
+
+    rc = main(["view", "sku", "GPU-GH200-01", "--action", "--yes"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert any("power-drain ss900770x4200980" in c for c in run_calls)
+    assert "=== Execution summary ===" in out
+
+
+def test_main_view_sku_action_yes_reports_worst_rc_on_partial_failure(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Two BMNs, both eligible for power-drain. Make one cwctl call fail.
+    two_bmn_json = json.dumps(
+        {
+            "items": [
+                {
+                    "metadata": {
+                        "name": "bmn-a",
+                        "labels": {"ds.coreweave.com/sku.cw-sku": "GPU-GH200-01"},
+                    },
+                    "status": {"reportedNodeInfo": {"nodeName": "g-a"}},
+                },
+                {
+                    "metadata": {
+                        "name": "bmn-b",
+                        "labels": {"ds.coreweave.com/sku.cw-sku": "GPU-GH200-01"},
+                    },
+                    "status": {"reportedNodeInfo": {"nodeName": "g-b"}},
+                },
+            ]
+        }
+    )
+    captures = _fake_capture_for_action(
+        awx_outputs={
+            ("mgmt", "bmn-a"): (_awx_with_code(), 0),
+            ("bmc", "bmn-a"): ("cw_error_codes={}\n", 0),
+            ("mgmt", "bmn-b"): (_awx_with_code(), 0),
+            ("bmc", "bmn-b"): ("cw_error_codes={}\n", 0),
+        },
+        json_output=(two_bmn_json, 0),
+    )
+    monkeypatch.setattr("frops.cli.capture_command", captures)
+
+    # First run_command call is the wide kubectl display (rc=0). The next two
+    # are the cwctl actions — make the second fail with rc=5.
+    rcs = iter([0, 0, 5])
+    monkeypatch.setattr("frops.cli.run_command", lambda _cmd: next(rcs))
+
+    rc = main(["view", "sku", "GPU-GH200-01", "--action", "--yes"])
+    out = capsys.readouterr().out
+    assert rc == 5, "worst rc across executed actions should propagate"
+    assert "1 succeeded, 1 failed" in out
+    assert "exit 5" in out
+
+
+def test_main_view_sku_action_yes_with_only_noops_skips_execution(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # No CW codes in either awxstat output → classifier returns NOOP.
+    captures = _fake_capture_for_action(
+        awx_outputs={
+            ("mgmt", "ss900770x4200980"): ("cw_error_codes={}\n", 0),
+            ("bmc", "ss900770x4200980"): ("cw_error_codes={}\n", 0),
+        }
+    )
+    monkeypatch.setattr("frops.cli.capture_command", captures)
+
+    run_calls: list[str] = []
+    monkeypatch.setattr(
+        "frops.cli.run_command",
+        lambda cmd: run_calls.append(cmd) or 0,  # type: ignore[func-returns-value]
+    )
+    # Input must not be called even without --yes when there's nothing actionable.
+    monkeypatch.setattr("builtins.input", _input_should_not_be_called)
+
+    rc = main(["view", "sku", "GPU-GH200-01", "--action", "--yes"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    # Only the wide kubectl view runs — no cwctl follow-ups.
+    assert len(run_calls) == 1
+    assert "Nothing actionable to execute" in out
+
+
+def test_main_yes_without_action_is_rejected(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("frops.cli.run_command", lambda _cmd: 0)
+    monkeypatch.setattr("frops.cli.capture_command", lambda _cmd: ("should-not-run", 0))
+    rc = main(["view", "sku", "GPU-GH200-01", "--yes"])
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert "--yes requires --action" in err
+
+
+def test_main_view_sku_action_yes_dry_run_mentions_execute_intent(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captures: list[str] = []
+    monkeypatch.setattr(
+        "frops.cli.capture_command",
+        lambda cmd: captures.append(cmd) or ("", 0),  # type: ignore[func-returns-value]
+    )
+    monkeypatch.setattr("frops.cli.run_command", lambda _cmd: 0)
+    rc = main(["--dry-run", "view", "sku", "GPU-GH200-01", "--action", "--yes"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert captures == [], "dry-run must not invoke kubectl/awxstat"
+    assert "would also fetch JSON BMN data" in out
+    assert "execute" in out

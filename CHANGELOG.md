@@ -21,7 +21,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   selects every available group, including the access check when
   NOOP-clean targets exist.
 
+### Changed
+- BMNs without a `status.reportedNodeInfo.nodeName` (no CW-NODE) are
+  no longer silently logged via the
+  `(skipped N BMN(s) with empty CW-NODE: …)` line. They now get:
+  - A dedicated **`=== BMNs missing CW-NODE (N) ===`** table above the
+    plan, listing each BMN with its `WORKFLOW` / `WORKFLOW-STEP` /
+    `STATE` from labels — enough to triage what they're doing without
+    having to re-run `bmns -o wide`.
+  - Inclusion in the **access-check pool** so `jumpipmitool` probes
+    them for reachability alongside the NOOP-no-codes BMNs. The
+    `[n]oop-access` count in the prompt is the combined total. Their
+    rows in the rendered access table read `(none)` in the `CW-NODE`
+    column so they're unambiguous.
+- Access-check section header renamed from
+  `=== Access check (NOOP nodes without CW codes) ===` to
+  `=== Access check (NOOP + missing CW-NODE) ===` to reflect the
+  combined pool.
+
 ### Added
+- `frops.access.render_missing_cwnode_summary(targets)` — renderer for
+  the new dedicated section.
+- `_build_targets` now returns `(targets, missing_cwnode)` where both
+  are `list[BMNTarget]`. CW-NODE-less items skip the awxstat lookup
+  (no node to query) but carry full SKU / serial / workflow / state
+  labels so the diagnostic surface has everything it needs.
 - `WORKFLOW-STEP` column in the `--action` access-check table, between
   `WORKFLOW` and `STATE`. Sourced from
   `flcc.coreweave.com/workflow-step` label on the BMN. New

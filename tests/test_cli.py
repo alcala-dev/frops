@@ -507,7 +507,7 @@ def test_main_view_sku_action_yes_with_only_noops_runs_access_check(
     # Only the wide kubectl view streams; no cwctl follow-ups.
     assert len(run_calls) == 1
     # Access check IS run under --yes when NOOP-clean targets exist.
-    assert "=== Access check (NOOP nodes without CW codes) ===" in out
+    assert "=== Access check (NOOP + missing CW-NODE) ===" in out
     # No execution summary because no actionable cwctl commands ran.
     assert "=== Execution summary ===" not in out
 
@@ -717,6 +717,95 @@ def _fake_bmns_wide_for(bmn: str, ts: str = "10m") -> str:
     return f"NAME    STATE  TS\n{bmn}  fail   {ts}\n"
 
 
+_MIXED_BMN_JSON = json.dumps(
+    {
+        "items": [
+            {
+                "metadata": {
+                    "name": "bmn-with-node",
+                    "labels": {
+                        "ds.coreweave.com/sku.cw-sku": "GPU-GH200-01",
+                        "flcc.coreweave.com/workflow": "provision-v2",
+                        "flcc.coreweave.com/workflow-step": "dpu-vaultify",
+                        "flcc.coreweave.com/state": "fail",
+                    },
+                },
+                "status": {"reportedNodeInfo": {"nodeName": "g123abc"}},
+            },
+            {
+                "metadata": {
+                    "name": "bmn-no-node",
+                    "labels": {
+                        "ds.coreweave.com/sku.cw-sku": "GPU-GH200-01",
+                        "flcc.coreweave.com/workflow": "provision-v2",
+                        "flcc.coreweave.com/workflow-step": "fielddiag",
+                        "flcc.coreweave.com/state": "fail",
+                    },
+                },
+                # No nodeName → ends up in the missing-CW-NODE bucket.
+                "status": {"reportedNodeInfo": {}},
+            },
+        ]
+    }
+)
+
+
+def test_main_view_sku_action_renders_missing_cwnode_section_and_includes_in_access_pool(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CW-NODE-less BMNs get their own table above the plan AND are
+    probed by jumpipmitool when [n] is selected, alongside NOOP-clean
+    BMNs from the plan."""
+    monkeypatch.delenv("JIRA_EMAIL", raising=False)
+    monkeypatch.delenv("JIRA_TOKEN", raising=False)
+
+    seen: list[str] = []
+
+    def _capture(cmd: str) -> tuple[str, int]:
+        seen.append(cmd)
+        if "-o json" in cmd:
+            return (_MIXED_BMN_JSON, 0)
+        # bmn-with-node has no CW codes → NOOP-clean (eligible for access)
+        if cmd.startswith("awxstat -l mgmt bmn-with-node") or cmd.startswith(
+            "awxstat -l bmc bmn-with-node"
+        ):
+            return ("cw_error_codes={}\n", 0)
+        if cmd.startswith("jumpipmitool"):
+            return ("Chassis Power is on\n", 0)
+        if cmd.startswith("bmns -o wide"):
+            return ("NAME    STATE  TS\nbmn  fail   1d\n", 0)
+        return ("", 0)
+
+    monkeypatch.setattr("frops.cli.capture_command", _capture)
+    monkeypatch.setattr("frops.cli.run_command", lambda _cmd: 0)
+    monkeypatch.setattr("builtins.input", lambda _p: "n")
+
+    rc = main(["view", "sku", "GPU-GH200-01", "--action"])
+    out = capsys.readouterr().out
+    assert rc == 0
+
+    # 1. Dedicated section appears with the CW-NODE-less BMN's findings.
+    assert "=== BMNs missing CW-NODE (1) ===" in out
+    # workflow / workflow-step / state from labels
+    for token in ("bmn-no-node", "provision-v2", "fielddiag", "fail"):
+        assert token in out
+
+    # 2. The old parenthetical "(skipped N BMN(s) ...)" wording is gone.
+    assert "(skipped " not in out
+
+    # 3. Access check probed BOTH BMNs (bmn-with-node from NOOP-clean +
+    # bmn-no-node from missing-cwnode).
+    ipmi_calls = [c for c in seen if c.startswith("jumpipmitool")]
+    assert any("bmn-with-node" in c for c in ipmi_calls), ipmi_calls
+    assert any("bmn-no-node" in c for c in ipmi_calls), ipmi_calls
+
+    # 4. Access table contains both — and CW-NODE-less BMN reads as `(none)`.
+    assert "=== Access check (NOOP + missing CW-NODE) ===" in out
+    assert "(none)" in out
+    assert "Checked 2 node(s)" in out
+
+
 def test_main_view_sku_action_runs_access_check_when_noop_selected(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
@@ -753,7 +842,7 @@ def test_main_view_sku_action_runs_access_check_when_noop_selected(
     ), seen
     assert any(c == "bmns -o wide ss900770x4200980" for c in seen), seen
 
-    assert "=== Access check (NOOP nodes without CW codes) ===" in out
+    assert "=== Access check (NOOP + missing CW-NODE) ===" in out
     assert "Checked 1 node(s): 1 reachable, 0 unreachable." in out
     for token in (
         "ss900770x4200980",

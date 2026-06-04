@@ -143,7 +143,7 @@ def test_render_plan_groups_by_kind_and_shows_totals() -> None:
     assert "[power-drain] 2 node(s)" in rendered
     assert "[ho-ticket] 1 node(s)" in rendered
     assert "[noop] 1 node(s)" in rendered
-    assert "Totals: power-drain=2, ho-ticket=1, noop=1" in rendered
+    assert "Totals: power-drain=2, ho-ticket=1, xid-109-return-to-ready=0, noop=1" in rendered
 
 
 def test_render_plan_includes_command_for_actionable_kinds() -> None:

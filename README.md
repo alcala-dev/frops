@@ -123,16 +123,30 @@ What `--action` does, per BMN with a non-empty `CW-NODE`:
      JIRA creds aren't set), falls back to
      `cwctl flcc node -w return-to-triage …`.
    - Other / no codes → no-op (eligible for the access check).
-4. Prints a grouped plan with the exact commands that would run and a
+4. **XID-109 detour** (any SKU): for BMNs currently in `CWNC-STATE=
+   triage`, looks up the matching open HO ticket and checks its
+   description for an `XID 109` mention. Matches split by
+   `PhaseState.reason`:
+   - `reason=nlcc` (both flcc and nlcc have reached triage) →
+     reclassified as `xid-109-return-to-ready` with the
+     `cwctl flcc node -w return-to-ready …` command.
+   - any other reason → rendered above the plan in
+     `=== XID 109 BMNs waiting for return-to-fleetops ===`, not
+     actionable until propagation completes.
+   Power-drain still takes precedence — a BMN already classified as
+   `power-drain` is never reclassified.
+5. Prints a grouped plan with the exact commands that would run and a
    totals line.
-5. Prompts you to pick which groups to execute (or with `--yes`, runs
-   every group).
-6. For each selected actionable group (`p` and/or `h`): runs each
+6. Prompts you to pick which groups to execute. The prompt offers
+   `[a]ll`, `[p]ower-drain`, `[h]o-ticket`, `[x]id-109-return`, and
+   `[n]oop-access` — only groups present in the plan appear. Multi-pick
+   via comma (e.g. `p,x`). With `--yes`, runs every group.
+7. For each selected actionable group (`p`, `h`, `x`): runs each
    `cwctl` command in order, streaming its output. A failure on one BMN
    does **not** abort the rest — the run continues and the worst exit
    code propagates as the process exit. An `=== Execution summary ===`
    block at the end lists any failures with their `cwctl` exit codes.
-7. If `n` is selected (or under `--yes` when NOOP-clean BMNs exist):
+8. If `n` is selected (or under `--yes` when NOOP-clean BMNs exist):
    runs a diagnostic access pass — `jumpipmitool -c "chassis power
    status"` per node, plus `bmns -o wide` for the canonical workflow /
    state / TS display — and prints an `=== Access check ===` table.

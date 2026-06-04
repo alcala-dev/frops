@@ -467,9 +467,11 @@ def test_main_view_sku_action_yes_reports_worst_rc_on_partial_failure(
     )
     monkeypatch.setattr("frops.cli.capture_command", captures)
 
-    # First run_command call is the wide kubectl display (rc=0). The next two
-    # are the cwctl actions — make the second fail with rc=5.
-    rcs = iter([0, 0, 5])
+    # The SKU wide view goes through run_command_filter_columns (capturing
+    # path); cwctl actions still go through run_command. Make the second
+    # cwctl call fail with rc=5.
+    monkeypatch.setattr("frops.cli.run_command_filter_columns", lambda _c, _k: 0)
+    rcs = iter([0, 5])
     monkeypatch.setattr("frops.cli.run_command", lambda _cmd: next(rcs))
 
     rc = main(["view", "sku", "GPU-GH200-01", "--action", "--yes"])
@@ -499,13 +501,16 @@ def test_main_view_sku_action_yes_with_only_noops_runs_access_check(
         "frops.cli.run_command",
         lambda cmd: run_calls.append(cmd) or 0,  # type: ignore[func-returns-value]
     )
+    # SKU wide view goes through the column-filter runner now; stub it out.
+    monkeypatch.setattr("frops.cli.run_command_filter_columns", lambda _c, _k: 0)
     monkeypatch.setattr("builtins.input", _input_should_not_be_called)
 
     rc = main(["view", "sku", "GPU-GH200-01", "--action", "--yes"])
     out = capsys.readouterr().out
     assert rc == 0
-    # Only the wide kubectl view streams; no cwctl follow-ups.
-    assert len(run_calls) == 1
+    # No cwctl follow-ups (only-NOOP plan); the SKU view stream is on its
+    # own path now, so run_command isn't called for it.
+    assert run_calls == []
     # Access check IS run under --yes when NOOP-clean targets exist.
     assert "=== Access check (NOOP + missing CW-NODE) ===" in out
     # No execution summary because no actionable cwctl commands ran.
@@ -595,6 +600,7 @@ def test_main_view_sku_action_resolves_ho_ticket_when_jira_creds_present(
             update_calls.append((key, block))
 
     monkeypatch.setattr("frops.cli.JIRAClient", _FakeJIRA)
+    monkeypatch.setattr("frops.cli.run_command_filter_columns", lambda _c, _k: 0)
 
     rc = main(["view", "sku", "GPU-GH200-01", "--action", "--yes"])
     out = capsys.readouterr().out
@@ -613,9 +619,9 @@ def test_main_view_sku_action_resolves_ho_ticket_when_jira_creds_present(
     assert update_calls and update_calls[0][0] == "HO-12345"
     assert "ss900770x4200980" in update_calls[0][1]
     assert "CW0201" in update_calls[0][1]
-    # The only run_command call should be the initial kubectl wide view.
-    assert len(run_calls) == 1
-    assert "kubectl" in run_calls[0]
+    # The SKU wide view runs through run_command_filter_columns (stubbed
+    # above), so run_command sees nothing — JIRA append handled the action.
+    assert run_calls == []
 
 
 def test_main_view_sku_action_falls_back_to_cwctl_when_no_jira_match(

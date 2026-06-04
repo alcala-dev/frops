@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- `JIRAClient.search` now hits `/rest/api/3/search/jql` instead of the
+  legacy `/rest/api/3/search` endpoint, which Atlassian retired and now
+  returns `HTTP 410 Gone`. The HO-ticket resolver and XID-109 pipeline
+  both went silent on the affected BMNs after the deprecation. Payload
+  shape is unchanged for our use case (jql + maxResults + fields). See
+  https://developer.atlassian.com/changelog/#CHANGE-2046.
+
 ### Added
 - **XID-109 return-to-ready pipeline** in `view sku --action`. When a
   BMN is in `CWNC-STATE=triage` and has an open `HO` ticket whose

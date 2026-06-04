@@ -49,6 +49,15 @@ from frops.jira import (
     JIRAError,
     build_search_jql,
 )
+from frops.xid109 import (
+    XID109Candidate,
+    collect_xid109_candidates,
+    fetch_phase_reason,
+    parse_cwnc_states,
+    render_waiting_summary,
+    return_to_ready_command,
+    split_by_actionable,
+)
 
 VIEW_TYPES: tuple[str, ...] = (*FAIL_TYPES, "sku")
 
@@ -200,6 +209,17 @@ def _run_sku_action_plan(sku: str, user_filter: str | None, *, auto_yes: bool = 
     if jira_client is not None and any(a.kind is ActionKind.HO_TICKET for a in actions):
         actions = _resolve_with_jira(actions, jira_client, targets_by_bmn)
 
+    # XID-109 detour: for triage BMNs whose HO ticket mentions XID 109, run
+    # the return-to-ready pipeline. Power-drain wins (per spec) — only NOOP
+    # and HO-ticket actions are eligible to be reclassified as XID-109.
+    # JIRA is required; we soft-skip when JIRA is unavailable.
+    xid109_actionable, xid109_waiting = _maybe_run_xid109_pipeline(actions, targets, jira_client)
+    if xid109_actionable:
+        actions = _apply_xid109_overrides(actions, xid109_actionable)
+    if xid109_waiting:
+        print()
+        print(render_waiting_summary(xid109_waiting))
+
     print()
     print(render_plan(actions))
 
@@ -215,7 +235,8 @@ def _run_sku_action_plan(sku: str, user_filter: str | None, *, auto_yes: bool = 
 
     # Per-group selection: which ActionKinds run via execute_plan, and
     # whether the access-check pass fires. --yes selects everything;
-    # otherwise we prompt with letter shortcuts ([a]ll/[p]/[h]/[n]/Enter).
+    # otherwise we prompt with letter shortcuts
+    # ([a]ll/[p]/[h]/[x]/[n]/Enter).
     if auto_yes:
         selected_kinds: set[ActionKind] = {a.kind for a in actionable}
         run_access = bool(access_pool)
@@ -258,6 +279,124 @@ def _try_make_jira_client() -> JIRAClient | None:
     except JIRAError as exc:
         print(f"\nnote: JIRA lookup disabled — {exc}", file=sys.stderr)
         return None
+
+
+def _maybe_run_xid109_pipeline(
+    actions: list[PlannedAction],
+    targets: list[BMNTarget],
+    jira_client: JIRAClient | None,
+) -> tuple[list[XID109Candidate], list[XID109Candidate]]:
+    """Return (actionable, waiting) XID-109 candidates, or ([], []) if skipped.
+
+    The pipeline only runs when (a) JIRA is available and (b) at least one
+    target is currently in a non-power-drain action class. Power-drain
+    actions are never eligible — they take precedence per the spec.
+    Failures along the way (bmns wide error, JIRA error, jsonpath error)
+    surface a single stderr note and the pipeline reports nothing rather
+    than aborting the larger plan.
+    """
+    if jira_client is None:
+        return [], []
+    eligible_targets = [
+        t
+        for t in targets
+        if not any(a.bmn == t.bmn and a.kind is ActionKind.POWER_DRAIN for a in actions)
+    ]
+    if not eligible_targets:
+        return [], []
+
+    cwnc_states = _fetch_cwnc_states([t.bmn for t in eligible_targets])
+    if not cwnc_states:
+        return [], []
+
+    def _search(identifiers: tuple[str, ...]) -> str | None:
+        try:
+            jql = build_search_jql(JIRA_PROJECT, identifiers, JIRA_OPEN_STATUSES)
+            issues = jira_client.search(jql)
+        except (JIRAError, ValueError) as exc:
+            print(
+                f"warning: XID-109 JIRA search failed for {identifiers}: {exc}",
+                file=sys.stderr,
+            )
+            return None
+        return issues[0].key if issues else None
+
+    def _fetch_desc(issue_key: str) -> str:
+        try:
+            return jira_client.fetch_description(issue_key)
+        except JIRAError as exc:
+            print(
+                f"warning: XID-109 description fetch failed for {issue_key}: {exc}",
+                file=sys.stderr,
+            )
+            return ""
+
+    def _fetch_phase(bmn: str) -> str:
+        return fetch_phase_reason(bmn, capture_command)
+
+    candidates = collect_xid109_candidates(
+        eligible_targets,
+        cwnc_states,
+        jira_search=_search,
+        fetch_description=_fetch_desc,
+        fetch_phase=_fetch_phase,
+    )
+    return split_by_actionable(candidates)
+
+
+def _fetch_cwnc_states(bmn_names: list[str]) -> dict[str, str]:
+    """One `bmns -o wide` call for many BMNs → {name: CWNC-STATE}.
+
+    bmns CLI accepts space-separated names. We pass all at once to avoid
+    N round-trips. On non-zero exit we surface the stderr note and return
+    {} so the XID-109 pipeline degrades quietly.
+    """
+    if not bmn_names:
+        return {}
+    cmd = "bmns -o wide " + " ".join(bmn_names)
+    out, rc = capture_command(cmd)
+    if rc != 0:
+        print(
+            f"warning: XID-109 bmns -o wide failed (exit {rc}):\n{out.strip()[:300]}",
+            file=sys.stderr,
+        )
+        return {}
+    return parse_cwnc_states(out)
+
+
+def _apply_xid109_overrides(
+    actions: list[PlannedAction],
+    xid109_actionable: list[XID109Candidate],
+) -> list[PlannedAction]:
+    """Replace each matching action with an XID_109_RETURN_TO_READY entry.
+
+    Power-drain rows are left alone (the pipeline already excluded them).
+    HO-ticket and NOOP entries get the new kind + return-to-ready command
+    + a note that points at the matching JIRA ticket.
+    """
+    actionable_by_bmn = {c.bmn: c for c in xid109_actionable}
+    rewritten: list[PlannedAction] = []
+    for action in actions:
+        cand = actionable_by_bmn.get(action.bmn)
+        if cand is None or action.kind is ActionKind.POWER_DRAIN:
+            rewritten.append(action)
+            continue
+        rewritten.append(
+            PlannedAction(
+                bmn=cand.bmn,
+                cw_node=cand.cw_node,
+                sku=cand.sku,
+                kind=ActionKind.XID_109_RETURN_TO_READY,
+                triggering_codes=action.triggering_codes,
+                command=return_to_ready_command(cand.bmn),
+                notes=(
+                    f"CWNC-STATE=triage; HO ticket {cand.jira_issue} mentions XID 109; "
+                    f"PhaseState reason={cand.phase_reason} → both controllers in triage"
+                ),
+                jira_issue=None,  # the XID-109 cwctl is the action; no JIRA write
+            )
+        )
+    return rewritten
 
 
 def _resolve_with_jira(
@@ -341,6 +480,15 @@ def _prompt_group_selection(
     if ActionKind.HO_TICKET in counts_by_kind:
         options.append(
             ("h", ActionKind.HO_TICKET, "[h]o-ticket", counts_by_kind[ActionKind.HO_TICKET])
+        )
+    if ActionKind.XID_109_RETURN_TO_READY in counts_by_kind:
+        options.append(
+            (
+                "x",
+                ActionKind.XID_109_RETURN_TO_READY,
+                "[x]id-109-return",
+                counts_by_kind[ActionKind.XID_109_RETURN_TO_READY],
+            )
         )
     if access_targets:
         # ActionKind.NOOP would be misleading — NOOP actions have no command.

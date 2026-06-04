@@ -806,6 +806,138 @@ def test_main_view_sku_action_renders_missing_cwnode_section_and_includes_in_acc
     assert "Checked 2 node(s)" in out
 
 
+# ----------------------------- view sku --action XID-109 -------------------
+
+
+_XID109_BMN_JSON = json.dumps(
+    {
+        "items": [
+            {
+                "metadata": {
+                    "name": "bmn-actionable",
+                    "labels": {
+                        "ds.coreweave.com/sku.cw-sku": "GPU-H100-02",
+                        "ds.coreweave.com/status.asset.serial": "BMN-ACTIONABLE",
+                        "flcc.coreweave.com/workflow": "orphan",
+                        "flcc.coreweave.com/state": "triage",
+                    },
+                },
+                "status": {"reportedNodeInfo": {"nodeName": "g111aaa"}},
+            },
+            {
+                "metadata": {
+                    "name": "bmn-waiting",
+                    "labels": {
+                        "ds.coreweave.com/sku.cw-sku": "GPU-H100-02",
+                        "ds.coreweave.com/status.asset.serial": "BMN-WAITING",
+                        "flcc.coreweave.com/workflow": "orphan",
+                        "flcc.coreweave.com/state": "triage",
+                    },
+                },
+                "status": {"reportedNodeInfo": {"nodeName": "g222bbb"}},
+            },
+        ]
+    }
+)
+
+
+def _xid109_bmns_wide(actionable_state: str = "triage", waiting_state: str = "triage") -> str:
+    return (
+        "NAME             DEVICESLOT        CW-NODE   EXISTS   ONLINE   CW-SKU         "
+        "BMC-IP         OWNER        CLUSTER     CWNC-STATE   WORKFLOW   "
+        "RETURN-WORKFLOW   RETURN-STATE   RETURN-STEP   PREV-WORKFLOW-STEP   "
+        "WORKFLOW-STEP   NEXT-WORKFLOW-STEP   PREV-STATE   STATE        "
+        "NEXT-STATE   TS     ORG-ID   NODE-PROFILE\n"
+        f"bmn-actionable   slot-a            g111aaa   true     true     GPU-H100-02    "
+        "10.0.0.1       unassigned   tenant-x    "
+        f"{actionable_state:<12} orphan     empty             empty          empty         "
+        "production           empty           empty                production   triage       "
+        "empty        1d     org-x    profile-y\n"
+        f"bmn-waiting      slot-b            g222bbb   true     true     GPU-H100-02    "
+        "10.0.0.2       unassigned   tenant-x    "
+        f"{waiting_state:<12} orphan     empty             empty          empty         "
+        "production           empty           empty                production   triage       "
+        "empty        1d     org-x    profile-y\n"
+    )
+
+
+def test_main_view_sku_action_xid109_pipeline_runs_via_x_selection(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two triage BMNs both match an HO ticket mentioning XID 109. One has
+    PhaseState reason=nlcc (actionable, List A), the other has reason=flcc
+    (waiting, List B). Selecting `x` runs return-to-ready only on List A."""
+    monkeypatch.setenv("JIRA_EMAIL", "me@x.com")
+    monkeypatch.setenv("JIRA_TOKEN", "tok")
+
+    seen: list[str] = []
+
+    def _capture(cmd: str, **_kwargs: object) -> tuple[str, int]:
+        seen.append(cmd)
+        # Order matters: jsonpath check must come before the broader "-o json"
+        # check since "jsonpath" is a substring of "json".
+        if cmd.startswith("kubectl get bmn bmn-actionable"):
+            return ("nlcc", 0)
+        if cmd.startswith("kubectl get bmn bmn-waiting"):
+            return ("flcc", 0)
+        if "kubectl get bmns -o json" in cmd:
+            return (_XID109_BMN_JSON, 0)
+        if cmd.startswith("awxstat"):
+            return ("cw_error_codes={}\n", 0)
+        if cmd.startswith("bmns -o wide"):
+            return (_xid109_bmns_wide(), 0)
+        return ("", 0)
+
+    monkeypatch.setattr("frops.cli.capture_command", _capture)
+
+    run_calls: list[str] = []
+    monkeypatch.setattr(
+        "frops.cli.run_command",
+        lambda cmd: run_calls.append(cmd) or 0,  # type: ignore[func-returns-value]
+    )
+
+    class _FakeJIRA:
+        def __init__(self) -> None:
+            pass
+
+        def search(self, _jql: str) -> list[object]:
+            from frops.jira import JIRAIssue
+
+            return [JIRAIssue(key="HO-12345", summary="...", status="Awaiting Support")]
+
+        def fetch_description(self, _key: str) -> str:
+            return "Node moved immediately by GPUContextSwitchTimeoutXid109 condition"
+
+        def append_to_description(self, _key: str, _block: str) -> None:
+            raise AssertionError("XID-109 path should not write to JIRA")
+
+    monkeypatch.setattr("frops.cli.JIRAClient", _FakeJIRA)
+    monkeypatch.setattr("builtins.input", lambda _p: "x")
+
+    rc = main(["view", "sku", "GPU-H100-02", "--action"])
+    out = capsys.readouterr().out
+    assert rc == 0
+
+    # 1. Waiting section rendered above the plan with the right BMN.
+    assert "=== XID 109 BMNs waiting for return-to-fleetops (1) ===" in out
+    assert "bmn-waiting" in out
+    assert "HO-12345" in out
+
+    # 2. The actionable BMN appears in the plan under [xid-109-return-to-ready].
+    assert "[xid-109-return-to-ready] 1 node(s)" in out
+    assert "bmn-actionable" in out
+
+    # 3. Selecting `x` executes return-to-ready for the actionable BMN only.
+    rtr_calls = [c for c in run_calls if "return-to-ready" in c]
+    assert any("return-to-ready bmn-actionable" in c for c in rtr_calls), rtr_calls
+    assert not any("return-to-ready bmn-waiting" in c for c in rtr_calls), rtr_calls
+
+    # 4. Execution summary reports the one successful action.
+    assert "=== Execution summary ===" in out
+    assert "1 succeeded, 0 failed" in out
+
+
 def test_main_view_sku_action_runs_access_check_when_noop_selected(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,

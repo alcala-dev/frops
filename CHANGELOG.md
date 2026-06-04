@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **XID-109 return-to-ready pipeline** in `view sku --action`. When a
+  BMN is in `CWNC-STATE=triage` and has an open `HO` ticket whose
+  description mentions XID 109 (covers `XID 109`, `Xid109`,
+  `XID-109`, and the embedded `…TimeoutXid109` form), the planner
+  splits matches into two lists based on `PhaseState.reason`:
+  - **List A (actionable)**: `reason=nlcc` (both flcc and nlcc have
+    reached triage). Becomes a new `ActionKind.XID_109_RETURN_TO_READY`
+    in the plan, with command
+    `cwctl flcc node -w return-to-ready <BMN> -o -m "sending node back
+    to ready, node failed prod for XID 109"`.
+  - **List B (waiting)**: any other `reason`. Rendered above the plan
+    as `=== XID 109 BMNs waiting for return-to-fleetops (N) ===` with
+    each BMN's CWNC-STATE, PhaseState reason, and HO ticket. Not
+    actionable until propagation completes.
+  Power-drain takes precedence — a BMN already classified as
+  `power-drain` is never reclassified. JIRA creds are required; the
+  pipeline soft-skips with a stderr note when they're missing.
+- New prompt letter **`[x]`** for the XID-109 group. Standard combos
+  apply (`x` alone, `a` for all, `p,x` for combinations).
+- New module `frops.xid109` (pure-functional + capture-injected like
+  `frops.access`): `parse_cwnc_states(bmns_wide_output)` extracts
+  `{bmn: CWNC-STATE}` from a batched `bmns -o wide` call;
+  `description_mentions_xid_109(text)` runs the regex match;
+  `fetch_phase_reason(bmn, capture)` reads the `PhaseState` condition
+  via `kubectl get bmn -o jsonpath`; `collect_xid109_candidates(...)`
+  runs the four-stage filter pipeline; `split_by_actionable` /
+  `render_waiting_summary` shape the output.
+- `JIRAClient.fetch_description(issue_key)` promoted to public — used
+  by the XID-109 pipeline to scan ticket descriptions.
+
 ### Changed
 - `frops view sku <SKU> --action` prompt now offers per-group selection
   via letter shortcuts:

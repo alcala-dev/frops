@@ -124,7 +124,7 @@ class JIRAClient:
         # `properties` or set the description as a text node. We use the
         # `update` API with the "set" verb and a plain string — JIRA Cloud
         # accepts string and renders it as ADF text.
-        current = self._fetch_description(issue_key)
+        current = self.fetch_description(issue_key)
         new_description = f"{current}\n\n{block}" if current else block
         self._request(
             "PUT",
@@ -132,9 +132,12 @@ class JIRAClient:
             {"fields": {"description": _wrap_as_adf(new_description)}},
         )
 
-    # ── Internals ─────────────────────────────────────────────────────────────
+    def fetch_description(self, issue_key: str) -> str:
+        """Plain-text view of an issue's Description (ADF flattened to text).
 
-    def _fetch_description(self, issue_key: str) -> str:
+        Public because the XID-109 classifier scans descriptions for the
+        XID 109 mention. Returns "" when the issue has no description.
+        """
         body = self._request(
             "GET",
             f"/rest/api/3/issue/{issue_key}?fields=description",

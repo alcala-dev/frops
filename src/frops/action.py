@@ -32,6 +32,10 @@ from frops.awx import AWXReport, CWError
 class ActionKind(str, Enum):
     POWER_DRAIN = "power-drain"
     HO_TICKET = "ho-ticket"
+    # Set by the XID-109 pipeline (frops.xid109) when a BMN has CWNC-STATE=triage,
+    # an open HO ticket mentioning XID 109, and PhaseState reason=nlcc. The
+    # remediation is `cwctl flcc node -w return-to-ready ...`.
+    XID_109_RETURN_TO_READY = "xid-109-return-to-ready"
     NOOP = "noop"
 
 
@@ -184,7 +188,12 @@ def render_plan(actions: list[PlannedAction]) -> str:
 
     lines: list[str] = ["=== Planned actions ==="]
 
-    for kind in (ActionKind.POWER_DRAIN, ActionKind.HO_TICKET, ActionKind.NOOP):
+    for kind in (
+        ActionKind.POWER_DRAIN,
+        ActionKind.HO_TICKET,
+        ActionKind.XID_109_RETURN_TO_READY,
+        ActionKind.NOOP,
+    ):
         bucket = by_kind.get(kind, [])
         if not bucket:
             continue

@@ -34,10 +34,11 @@ from frops.catalog import (
     FAIL_COMMANDS,
     FAIL_TYPES,
     OWNERSHIP_LABEL_TEMPLATE,
+    SKU_VIEW_COLUMNS,
     SKU_VIEW_TEMPLATE,
     SKU_VIEW_TEMPLATE_JSON,
 )
-from frops.commands import capture_command, run_command
+from frops.commands import capture_command, run_command, run_command_filter_columns
 from frops.jira import (
     DEFAULT_PROJECT as JIRA_PROJECT,
 )
@@ -152,7 +153,12 @@ def handle_view(args: argparse.Namespace) -> int:
             print(note)
         return 0
 
-    view_rc = run_command(cmd)
+    # SKU view trims down to the operator-facing columns in SKU_VIEW_COLUMNS;
+    # everything else streams the raw kubectl/kubecolor output (colors preserved).
+    if args.fail_type == "sku":
+        view_rc = run_command_filter_columns(cmd, SKU_VIEW_COLUMNS)
+    else:
+        view_rc = run_command(cmd)
     if not action_flag:
         return view_rc
 

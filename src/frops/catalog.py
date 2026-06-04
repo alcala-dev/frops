@@ -47,6 +47,34 @@ SKU_VIEW_TEMPLATE: Final[str] = (
     f"flcc.coreweave.com/state notin ({_SKU_EXCLUDED_RENDERED})'"
 )
 
+# Columns the SKU view should display from `kubectl get bmns -o wide`.
+# The CRD's full wide format emits 23 columns; this trims off the columns
+# that aren't useful for the at-a-glance triage view (the various
+# *_WORKFLOW_STEP / NEXT-STATE columns), and reorders WORKFLOW-STEP to
+# follow the RETURN-* group for readability.
+SKU_VIEW_COLUMNS: Final[tuple[str, ...]] = (
+    "NAME",
+    "DEVICESLOT",
+    "CW-NODE",
+    "EXISTS",
+    "ONLINE",
+    "CW-SKU",
+    "BMC-IP",
+    "OWNER",
+    "CLUSTER",
+    "CWNC-STATE",
+    "WORKFLOW",
+    "RETURN-WORKFLOW",
+    "RETURN-STATE",
+    "RETURN-STEP",
+    "WORKFLOW-STEP",
+    "PREV-STATE",
+    "STATE",
+    "TS",
+    "ORG-ID",
+    "NODE-PROFILE",
+)
+
 # Same selector, JSON output. Used by '--action' to fetch structured BMN
 # data (CW-NODE, labels) alongside the colored human display.
 SKU_VIEW_TEMPLATE_JSON: Final[str] = (

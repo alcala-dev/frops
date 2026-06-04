@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- `frops view sku <SKU>` (with or without `--action`) now trims the first
+  table to a curated 20-column subset
+  (`SKU_VIEW_COLUMNS` in `frops.catalog`). Drops `PREV-WORKFLOW-STEP`,
+  `NEXT-WORKFLOW-STEP`, and `NEXT-STATE` from the CRD's full wide format;
+  reorders `WORKFLOW-STEP` to follow the `RETURN-*` group. Trade-off:
+  `kubecolor`'s ANSI colors no longer apply to this table because column
+  filtering requires capturing the output (which disables the child's
+  TTY detection). Data is unchanged.
+- New `frops.commands.run_command_filter_columns(cmd, keep)` helper
+  drives the trimmed view. Robust to value overflow via 2+-whitespace
+  column splitting; unknown header names in `keep` are silently dropped
+  so older CRDs degrade gracefully. Error output (non-zero rc) is
+  forwarded verbatim so kubectl error messages aren't swallowed.
+
 ### Fixed
 - `JIRAClient.search` now hits `/rest/api/3/search/jql` instead of the
   legacy `/rest/api/3/search` endpoint, which Atlassian retired and now

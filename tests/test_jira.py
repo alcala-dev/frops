@@ -205,7 +205,7 @@ def test_search_parses_issues_and_sends_basic_auth(
         )
     ]
     assert sent["method"] == "POST"
-    assert sent["url"].endswith("/rest/api/3/search")
+    assert sent["url"].endswith("/rest/api/3/search/jql")
     assert sent["auth"].startswith("Basic ")
     assert sent["body"]["jql"].startswith("project = HO")
     assert sent["body"]["maxResults"] == 50

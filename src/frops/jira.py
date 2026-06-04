@@ -100,13 +100,21 @@ class JIRAClient:
     # ── Public API ────────────────────────────────────────────────────────────
 
     def search(self, jql: str) -> list[JIRAIssue]:
-        """Run JQL via /rest/api/3/search. Returns at most SEARCH_MAX_RESULTS."""
+        """Run JQL via /rest/api/3/search/jql. Returns at most SEARCH_MAX_RESULTS.
+
+        Atlassian retired the legacy `/rest/api/3/search` endpoint (HTTP 410
+        as of 2025); we hit the JQL-specific replacement instead. Payload
+        shape is the same for our use case (jql, maxResults, fields). The
+        new endpoint paginates via `nextPageToken` rather than start/total,
+        but we only ever consume `issues[0]` so we never need a second page.
+        See: https://developer.atlassian.com/changelog/#CHANGE-2046
+        """
         payload = {
             "jql": jql,
             "maxResults": SEARCH_MAX_RESULTS,
             "fields": ["summary", "status"],
         }
-        body = self._request("POST", "/rest/api/3/search", payload)
+        body = self._request("POST", "/rest/api/3/search/jql", payload)
         issues_raw = body.get("issues") or []
         return [_issue_from_json(raw) for raw in issues_raw]
 

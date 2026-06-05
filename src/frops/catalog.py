@@ -48,8 +48,11 @@ SKU_VIEW_TEMPLATE: Final[str] = (
 )
 
 # Shell pipeline appended to the SKU view kubectl command to trim the
-# CRD's 23 wide-format columns down to the 20 fields operators triage on.
+# CRD's 23 wide-format columns down to the 17 fields operators triage on.
 # Indices (1-based) skip:
+#   $12 RETURN-WORKFLOW
+#   $13 RETURN-STATE
+#   $14 RETURN-STEP
 #   $15 PREV-WORKFLOW-STEP
 #   $17 NEXT-WORKFLOW-STEP
 #   $20 NEXT-STATE
@@ -57,7 +60,7 @@ SKU_VIEW_TEMPLATE: Final[str] = (
 # Trade-off vs. plain wide: kubecolor's ANSI colors are lost because the
 # pipe disables the child's TTY detection. Data is unchanged.
 SKU_VIEW_COLUMN_PIPELINE: Final[str] = (
-    "awk '{print $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, "
+    "awk '{print $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, "
     "$16, $18, $19, $21, $22, $23}' | column -t"
 )
 

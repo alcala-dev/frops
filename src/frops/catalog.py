@@ -56,21 +56,14 @@ SKU_VIEW_TEMPLATE: Final[str] = (
 #   $15 PREV-WORKFLOW-STEP
 #   $17 NEXT-WORKFLOW-STEP
 #   $20 NEXT-STATE
-# `column -t` reflows the awk output into aligned columns; `less -SRFX`
-# stops the terminal from wrapping long rows and lets the operator scroll
-# horizontally (←/→) for the columns that don't fit:
-#   -S  chop long lines instead of wrapping
-#   -R  pass ANSI escape sequences through
-#   -F  exit immediately if the output fits on one screen (short tables
-#       go through unpaged so we don't trap the operator)
-#   -X  don't switch to the alternate screen buffer; the table stays
-#       visible on stdout after `q` so the action plan / prompt that
-#       follow aren't laid over a blank screen
+# `column -t` reflows the awk output into aligned columns. The terminal's
+# auto-wrap mode is toggled off around this command in cli.py so wide rows
+# don't break across multiple visual lines.
 # Trade-off vs. plain wide: kubecolor's ANSI colors are lost because the
 # pipe disables the child's TTY detection. Data is unchanged.
 SKU_VIEW_COLUMN_PIPELINE: Final[str] = (
     "awk '{print $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, "
-    "$16, $18, $19, $21, $22, $23}' | column -t | less -SRFX"
+    "$16, $18, $19, $21, $22, $23}' | column -t"
 )
 
 # Same selector, JSON output. Used by '--action' to fetch structured BMN

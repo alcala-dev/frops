@@ -17,11 +17,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `SKU_VIEW_COLUMN_PIPELINE` (catalog.py) and is appended in
   `build_sku_command`. Trade-off: `kubecolor`'s ANSI colors are
   disabled on this table because the pipe disables the child's TTY
-  detection. Data is unchanged. The pipeline ends with `less -SRFX`
-  so long rows no longer wrap at the terminal edge — left/right arrows
-  scroll horizontally. `less -F` exits without paging when the table
-  fits on one screen, and `-X` keeps the table visible after `q` so
-  the `--action` plan / prompt that follow stay in view.
+  detection. Data is unchanged. The terminal's auto-wrap mode is
+  toggled off (`\e[?7l`) just before the SKU view command runs and
+  restored (`\e[?7h`) immediately after via a `try`/`finally` in
+  `handle_view`, so wide rows truncate at the terminal edge instead
+  of wrapping — and the action plan / prompt continue inline with no
+  pager intervention. Terminals that retain full rows in scrollback
+  (iTerm2, tmux, …) let you scroll right; plainer terminals visually
+  clip the overflow. Replaces the `less -SRFX` pager approach
+  previously documented under this entry.
 
 ### Removed
 - `frops.commands.run_command_filter_columns` and

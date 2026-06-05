@@ -54,9 +54,10 @@ def test_build_sku_command_appends_awk_and_column_pipeline() -> None:
     assert "awk '{print $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, " in cmd
     assert "$16, $18, $19, $21, $22, $23}'" in cmd
     assert "| column -t" in cmd
-    # `less -SRFX` keeps long rows from wrapping (chop + horizontal scroll)
-    # and quits unpaged when the table fits on one screen.
-    assert "| less -SRFX" in cmd
+    # No `less` / pager — terminal wrap is toggled off around this command
+    # in handle_view via `\\e[?7l` / `\\e[?7h` instead, so the table prints
+    # inline and the action plan / prompt follow without user intervention.
+    assert "less" not in cmd
     # Make sure the dropped RETURN-* indices truly aren't there.
     assert "$12" not in cmd
     assert "$13" not in cmd
@@ -164,6 +165,44 @@ def test_main_view_sku_dry_run_renders_command(
     out = capsys.readouterr().out
     assert "Viewing: sku=GPU-GH200-01" in out
     assert "ds.coreweave.com/sku.cw-sku=GPU-GH200-01" in out
+
+
+def test_main_view_sku_toggles_terminal_wrap_around_run(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`view sku` must emit \\e[?7l before the kubectl run and \\e[?7h after,
+    so wide rows truncate at the terminal edge instead of wrapping."""
+    calls: list[str] = []
+    monkeypatch.setattr(
+        "frops.cli.run_command",
+        lambda cmd: calls.append(cmd) or 0,  # type: ignore[func-returns-value]
+    )
+
+    rc = main(["view", "sku", "GPU-GH200-01"])
+    assert rc == 0
+    out = capsys.readouterr().out
+
+    # Both escape sequences appear, in order — disable before run, re-enable after.
+    assert "\033[?7l" in out
+    assert "\033[?7h" in out
+    assert out.index("\033[?7l") < out.index("\033[?7h")
+    # The kubectl command was actually invoked between the toggles.
+    assert any("kubectl" in c for c in calls), calls
+
+
+def test_main_view_non_sku_does_not_toggle_terminal_wrap(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Wrap toggling is SKU-view specific; other fail-type views (which
+    don't have an awk pipeline appended) stream untouched."""
+    monkeypatch.setattr("frops.cli.run_command", lambda _cmd: 0)
+    rc = main(["view", "fails"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "\033[?7l" not in out
+    assert "\033[?7h" not in out
 
 
 def test_main_view_sku_missing_value_errors(

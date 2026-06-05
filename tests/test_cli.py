@@ -49,11 +49,15 @@ def test_build_sku_command_renders_sku_and_excluded_states() -> None:
 
 def test_build_sku_command_appends_awk_and_column_pipeline() -> None:
     cmd = build_sku_command("GPU-GH200-01", None)
-    # awk drops $15 (PREV-WORKFLOW-STEP), $17 (NEXT-WORKFLOW-STEP),
-    # $20 (NEXT-STATE) and prints the remaining 20 of the 23 wide columns.
-    assert "awk '{print $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, " in cmd
+    # awk drops $12-$14 (RETURN-*), $15 (PREV-WORKFLOW-STEP),
+    # $17 (NEXT-WORKFLOW-STEP), $20 (NEXT-STATE) — leaves 17 columns.
+    assert "awk '{print $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, " in cmd
     assert "$16, $18, $19, $21, $22, $23}'" in cmd
     assert "| column -t" in cmd
+    # Make sure the dropped RETURN-* indices truly aren't there.
+    assert "$12" not in cmd
+    assert "$13" not in cmd
+    assert "$14" not in cmd
 
 
 def test_build_sku_command_splices_user_filter() -> None:

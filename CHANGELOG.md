@@ -9,10 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - `frops view sku <SKU>` (with or without `--action`) now trims the
-  first table to a curated 20-column subset via a shell pipeline:
+  first table to a curated **17-column** subset via a shell pipeline:
   `kubectl get bmns -o wide -l '...' | awk '{print $1, …, $23}' | column -t`.
-  Drops `PREV-WORKFLOW-STEP`, `NEXT-WORKFLOW-STEP`, and `NEXT-STATE`
-  from the CRD's full wide format. The pipeline definition lives in
+  Drops `RETURN-WORKFLOW`, `RETURN-STATE`, `RETURN-STEP`,
+  `PREV-WORKFLOW-STEP`, `NEXT-WORKFLOW-STEP`, and `NEXT-STATE` from
+  the CRD's full wide format. The pipeline definition lives in
   `SKU_VIEW_COLUMN_PIPELINE` (catalog.py) and is appended in
   `build_sku_command`. Trade-off: `kubecolor`'s ANSI colors are
   disabled on this table because the pipe disables the child's TTY

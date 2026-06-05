@@ -22,6 +22,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 from frops.action import ActionKind, BMNTarget, PlannedAction
+from frops.colors import yellow
 
 # (stdout, rc) — matches frops.commands.capture_command's contract.
 # Variadic so callers can pass `timeout=<seconds>` without breaking tests
@@ -154,7 +155,11 @@ def render_access_summary(reports: list[AccessReport]) -> str:
     lines.append("  ".join("-" * w for w in widths))
     for i, r in enumerate(reports):
         row_values = [vs[i] for _, vs in cols]
-        lines.append("  ".join(v.ljust(w) for v, w in zip(row_values, widths, strict=True)))
+        # ljust on plain text first, then wrap the BMN cell in color so
+        # alignment isn't thrown off by the (zero-display-width) ANSI escapes.
+        cells = [v.ljust(w) for v, w in zip(row_values, widths, strict=True)]
+        cells[0] = yellow(cells[0])  # BMN
+        lines.append("  ".join(cells))
         # Detail line indented under the row for failures / interesting output.
         if not r.reachable or r.detail not in ("Chassis Power is on", "Chassis Power is off"):
             lines.append(f"    ↳ {r.detail}")
@@ -194,7 +199,9 @@ def render_missing_cwnode_summary(targets: list[BMNTarget]) -> str:
     lines.append("  ".join("-" * w for w in widths))
     for i in range(len(targets)):
         row = [vs[i] for _, vs in cols]
-        lines.append("  ".join(v.ljust(w) for v, w in zip(row, widths, strict=True)))
+        cells = [v.ljust(w) for v, w in zip(row, widths, strict=True)]
+        cells[0] = yellow(cells[0])  # BMN
+        lines.append("  ".join(cells))
     return "\n".join(lines)
 
 

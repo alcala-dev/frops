@@ -7,32 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `frops.colors` — small TTY-aware ANSI helper (`yellow`/`cyan`/
+  `magenta`/`dim`). Respects `NO_COLOR`, `FROPS_NO_COLOR`, and the
+  `FROPS_FORCE_COLOR` override for scripted captures. Used by every
+  renderer that prints BMN identifiers, HO ticket keys, or DEVICESLOT
+  values:
+  - **BMN names** rendered in yellow (first table, plan, access check,
+    XID 109 waiting list, missing-CW-NODE section, execution summary).
+  - **HO ticket keys** rendered in cyan (plan's "append to HO-12345"
+    line, XID 109 waiting `HO TICKET` column, execution summary).
+  - **DEVICESLOT** values rendered in magenta (first table).
+  - `(none)` placeholders rendered dim so empty-CW-NODE rows
+    visually subside.
+- `frops.view_table.render_sku_view_table(raw)` — position-aware
+  Python renderer for `kubectl get bmns -o wide` that replaces the
+  prior `awk + column -t` shell pipeline.
+
 ### Changed
-- `frops view sku <SKU>` (with or without `--action`) now trims the
-  first table to a curated **17-column** subset via a shell pipeline:
-  `kubectl get bmns -o wide -l '...' | awk '{print $1, …, $23}' | column -t`.
-  Drops `RETURN-WORKFLOW`, `RETURN-STATE`, `RETURN-STEP`,
-  `PREV-WORKFLOW-STEP`, `NEXT-WORKFLOW-STEP`, and `NEXT-STATE` from
-  the CRD's full wide format. The pipeline definition lives in
-  `SKU_VIEW_COLUMN_PIPELINE` (catalog.py) and is appended in
-  `build_sku_command`. Trade-off: `kubecolor`'s ANSI colors are
-  disabled on this table because the pipe disables the child's TTY
-  detection. Data is unchanged. The terminal's auto-wrap mode is
-  toggled off (`\e[?7l`) just before the SKU view command runs and
-  restored (`\e[?7h`) immediately after via a `try`/`finally` in
-  `handle_view`, so wide rows truncate at the terminal edge instead
-  of wrapping — and the action plan / prompt continue inline with no
-  pager intervention. Terminals that retain full rows in scrollback
-  (iTerm2, tmux, …) let you scroll right; plainer terminals visually
-  clip the overflow. Replaces the `less -SRFX` pager approach
-  previously documented under this entry.
+- `frops view sku <SKU>` first table now goes through
+  `capture_command` + `frops.view_table.render_sku_view_table`
+  instead of the previous `awk + column -t` pipeline. This fixes a
+  regression where rows with an **empty CW-NODE** had their
+  `EXISTS`/`ONLINE` values shifted left into the CW-NODE column
+  (awk's default field splitter collapses runs of whitespace, so a
+  missing cell silently disappears). The renderer slices each row at
+  the header's column positions, so empty cells stay empty —
+  `(none)` is substituted for missing CW-NODE so the row is
+  unambiguous. The 17-column subset is unchanged.
+- The renderer **truncates** long `CLUSTER` (28 chars) and
+  `NODE-PROFILE` (24 chars) values with a `…` indicator so the
+  trimmed table fits on typical terminal widths. Full values are
+  still available via `bmns -o wide <BMN>` for deep dives. Tune the
+  caps in `frops.view_table.TRUNCATE_LIMITS`.
+- The auto-wrap toggle (`\e[?7l` / `\e[?7h`) stays around the SKU
+  view render so wide rows still truncate cleanly at narrow terminal
+  widths.
 
 ### Removed
-- `frops.commands.run_command_filter_columns` and
-  `frops.commands._filter_table_columns` (and the corresponding tests)
-  — the Python-side column filter introduced earlier in [Unreleased]
-  is replaced by the shell pipeline above. `SKU_VIEW_COLUMNS`
-  constant is gone for the same reason. Net code is simpler.
+- `SKU_VIEW_COLUMN_PIPELINE` from `frops.catalog` — the shell pipeline
+  is replaced by the Python renderer above.
 
 ### Fixed
 - `JIRAClient.search` now hits `/rest/api/3/search/jql` instead of the

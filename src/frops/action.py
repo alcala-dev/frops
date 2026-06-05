@@ -27,6 +27,7 @@ from dataclasses import dataclass
 from enum import Enum
 
 from frops.awx import AWXReport, CWError
+from frops.colors import cyan, yellow
 
 
 class ActionKind(str, Enum):
@@ -199,11 +200,13 @@ def render_plan(actions: list[PlannedAction]) -> str:
             continue
         lines.append(f"\n[{kind.value}] {len(bucket)} node(s)")
         for action in bucket:
-            lines.append(f"  - {action.bmn} (CW-NODE={action.cw_node}, SKU={action.sku})")
+            # Colors: BMN names yellow, HO ticket keys cyan. CW-NODE / SKU
+            # stay uncolored — they're context, not the operator's pivot.
+            lines.append(f"  - {yellow(action.bmn)} (CW-NODE={action.cw_node}, SKU={action.sku})")
             if action.triggering_codes:
                 lines.append(f"      codes: {', '.join(action.triggering_codes)}")
             if action.jira_issue:
-                lines.append(f"      jira: append to {action.jira_issue} description")
+                lines.append(f"      jira: append to {cyan(action.jira_issue)} description")
             elif action.command:
                 lines.append(f"      command: {action.command}")
             lines.append(f"      note: {action.notes}")
@@ -376,9 +379,9 @@ def render_execution_summary(summary: ExecutionSummary) -> str:
     if summary.failed:
         lines.append("\nFailures:")
         for r in summary.failed:
-            lines.append(f"  - {r.action.bmn} [{r.action.kind.value}] exit {r.rc}")
+            lines.append(f"  - {yellow(r.action.bmn)} [{r.action.kind.value}] exit {r.rc}")
             if r.action.jira_issue:
-                lines.append(f"      jira:    append to {r.action.jira_issue}")
+                lines.append(f"      jira:    append to {cyan(r.action.jira_issue)}")
             elif r.action.command:
                 lines.append(f"      command: {r.action.command}")
     return "\n".join(lines)

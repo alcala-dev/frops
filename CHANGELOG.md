@@ -17,7 +17,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `SKU_VIEW_COLUMN_PIPELINE` (catalog.py) and is appended in
   `build_sku_command`. Trade-off: `kubecolor`'s ANSI colors are
   disabled on this table because the pipe disables the child's TTY
-  detection. Data is unchanged.
+  detection. Data is unchanged. The pipeline ends with `less -SRFX`
+  so long rows no longer wrap at the terminal edge — left/right arrows
+  scroll horizontally. `less -F` exits without paging when the table
+  fits on one screen, and `-X` keeps the table visible after `q` so
+  the `--action` plan / prompt that follow stay in view.
 
 ### Removed
 - `frops.commands.run_command_filter_columns` and

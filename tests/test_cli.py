@@ -54,6 +54,9 @@ def test_build_sku_command_appends_awk_and_column_pipeline() -> None:
     assert "awk '{print $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, " in cmd
     assert "$16, $18, $19, $21, $22, $23}'" in cmd
     assert "| column -t" in cmd
+    # `less -SRFX` keeps long rows from wrapping (chop + horizontal scroll)
+    # and quits unpaged when the table fits on one screen.
+    assert "| less -SRFX" in cmd
     # Make sure the dropped RETURN-* indices truly aren't there.
     assert "$12" not in cmd
     assert "$13" not in cmd

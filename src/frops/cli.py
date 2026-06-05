@@ -34,11 +34,11 @@ from frops.catalog import (
     FAIL_COMMANDS,
     FAIL_TYPES,
     OWNERSHIP_LABEL_TEMPLATE,
-    SKU_VIEW_COLUMNS,
+    SKU_VIEW_COLUMN_PIPELINE,
     SKU_VIEW_TEMPLATE,
     SKU_VIEW_TEMPLATE_JSON,
 )
-from frops.commands import capture_command, run_command, run_command_filter_columns
+from frops.commands import capture_command, run_command
 from frops.jira import (
     DEFAULT_PROJECT as JIRA_PROJECT,
 )
@@ -82,8 +82,14 @@ def build_command(fail_type: str, user_filter: str | None) -> str:
 
 
 def build_sku_command(sku: str, user_filter: str | None) -> str:
-    """Return the kubectl command for a SKU view, optionally filtered by owner."""
-    return _splice_user_filter(SKU_VIEW_TEMPLATE.format(sku=sku), user_filter)
+    """Return the kubectl pipeline for a SKU view, optionally filtered by owner.
+
+    The kubectl command's output is piped through awk to drop the columns
+    that aren't useful for the at-a-glance triage view and then through
+    `column -t` to re-align. See `SKU_VIEW_COLUMN_PIPELINE` in catalog.py.
+    """
+    base = _splice_user_filter(SKU_VIEW_TEMPLATE.format(sku=sku), user_filter)
+    return f"{base} | {SKU_VIEW_COLUMN_PIPELINE}"
 
 
 def build_sku_command_json(sku: str, user_filter: str | None) -> str:
@@ -153,12 +159,7 @@ def handle_view(args: argparse.Namespace) -> int:
             print(note)
         return 0
 
-    # SKU view trims down to the operator-facing columns in SKU_VIEW_COLUMNS;
-    # everything else streams the raw kubectl/kubecolor output (colors preserved).
-    if args.fail_type == "sku":
-        view_rc = run_command_filter_columns(cmd, SKU_VIEW_COLUMNS)
-    else:
-        view_rc = run_command(cmd)
+    view_rc = run_command(cmd)
     if not action_flag:
         return view_rc
 

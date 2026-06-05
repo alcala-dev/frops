@@ -8,19 +8,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
-- `frops view sku <SKU>` (with or without `--action`) now trims the first
-  table to a curated 20-column subset
-  (`SKU_VIEW_COLUMNS` in `frops.catalog`). Drops `PREV-WORKFLOW-STEP`,
-  `NEXT-WORKFLOW-STEP`, and `NEXT-STATE` from the CRD's full wide format;
-  reorders `WORKFLOW-STEP` to follow the `RETURN-*` group. Trade-off:
-  `kubecolor`'s ANSI colors no longer apply to this table because column
-  filtering requires capturing the output (which disables the child's
-  TTY detection). Data is unchanged.
-- New `frops.commands.run_command_filter_columns(cmd, keep)` helper
-  drives the trimmed view. Robust to value overflow via 2+-whitespace
-  column splitting; unknown header names in `keep` are silently dropped
-  so older CRDs degrade gracefully. Error output (non-zero rc) is
-  forwarded verbatim so kubectl error messages aren't swallowed.
+- `frops view sku <SKU>` (with or without `--action`) now trims the
+  first table to a curated 20-column subset via a shell pipeline:
+  `kubectl get bmns -o wide -l '...' | awk '{print $1, …, $23}' | column -t`.
+  Drops `PREV-WORKFLOW-STEP`, `NEXT-WORKFLOW-STEP`, and `NEXT-STATE`
+  from the CRD's full wide format. The pipeline definition lives in
+  `SKU_VIEW_COLUMN_PIPELINE` (catalog.py) and is appended in
+  `build_sku_command`. Trade-off: `kubecolor`'s ANSI colors are
+  disabled on this table because the pipe disables the child's TTY
+  detection. Data is unchanged.
+
+### Removed
+- `frops.commands.run_command_filter_columns` and
+  `frops.commands._filter_table_columns` (and the corresponding tests)
+  — the Python-side column filter introduced earlier in [Unreleased]
+  is replaced by the shell pipeline above. `SKU_VIEW_COLUMNS`
+  constant is gone for the same reason. Net code is simpler.
 
 ### Fixed
 - `JIRAClient.search` now hits `/rest/api/3/search/jql` instead of the

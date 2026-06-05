@@ -34,7 +34,6 @@ from frops.catalog import (
     FAIL_COMMANDS,
     FAIL_TYPES,
     OWNERSHIP_LABEL_TEMPLATE,
-    SKU_VIEW_COLUMN_PIPELINE,
     SKU_VIEW_TEMPLATE,
     SKU_VIEW_TEMPLATE_JSON,
 )
@@ -50,6 +49,7 @@ from frops.jira import (
     JIRAError,
     build_search_jql,
 )
+from frops.view_table import render_sku_view_table
 from frops.xid109 import (
     XID109Candidate,
     collect_xid109_candidates,
@@ -82,14 +82,13 @@ def build_command(fail_type: str, user_filter: str | None) -> str:
 
 
 def build_sku_command(sku: str, user_filter: str | None) -> str:
-    """Return the kubectl pipeline for a SKU view, optionally filtered by owner.
+    """Return the raw kubectl wide-format command for a SKU view.
 
-    The kubectl command's output is piped through awk to drop the columns
-    that aren't useful for the at-a-glance triage view and then through
-    `column -t` to re-align. See `SKU_VIEW_COLUMN_PIPELINE` in catalog.py.
+    Column trimming + colorization happens in Python (see
+    `frops.view_table.render_sku_view_table`) so empty cells stay
+    in their right column and BMN / DEVICESLOT get colors.
     """
-    base = _splice_user_filter(SKU_VIEW_TEMPLATE.format(sku=sku), user_filter)
-    return f"{base} | {SKU_VIEW_COLUMN_PIPELINE}"
+    return _splice_user_filter(SKU_VIEW_TEMPLATE.format(sku=sku), user_filter)
 
 
 def build_sku_command_json(sku: str, user_filter: str | None) -> str:
@@ -159,21 +158,27 @@ def handle_view(args: argparse.Namespace) -> int:
             print(note)
         return 0
 
-    # SKU view rows are wider than most terminals. Toggle the terminal's
-    # auto-wrap mode off so long rows truncate at the right edge instead of
-    # breaking across multiple visual lines. Terminals that keep the full
-    # row in scrollback (iTerm2, tmux, …) let the operator scroll right;
-    # in plainer terminals the overflow is visually clipped. try/finally
-    # guarantees the wrap state is restored even on Ctrl-C / subprocess
-    # error so the following plan + prompt render normally.
+    # SKU view: capture the kubectl wide output so the position-aware
+    # renderer can subset columns, substitute `(none)` for empty CW-NODE,
+    # truncate the worst-offender columns, and color BMN / DEVICESLOT.
+    # Auto-wrap is toggled off around the print so the (already trimmed)
+    # row still truncates cleanly at the terminal edge on narrow widths;
+    # try/finally restores wrap even on Ctrl-C / render error.
+    # Other fail-type views keep streaming via run_command (colors
+    # preserved end-to-end through kubecolor).
     if args.fail_type == "sku":
-        sys.stdout.write("\033[?7l")  # DEC private: disable auto-wrap
-        sys.stdout.flush()
-        try:
-            view_rc = run_command(cmd)
-        finally:
-            sys.stdout.write("\033[?7h")  # DEC private: re-enable auto-wrap
+        raw, view_rc = capture_command(cmd)
+        if view_rc == 0 and raw:
+            sys.stdout.write("\033[?7l")  # DEC private: disable auto-wrap
             sys.stdout.flush()
+            try:
+                print(render_sku_view_table(raw))
+            finally:
+                sys.stdout.write("\033[?7h")  # DEC private: re-enable auto-wrap
+                sys.stdout.flush()
+        elif raw:
+            # Forward kubectl's error output verbatim on non-zero exit.
+            print(raw, end="" if raw.endswith("\n") else "\n")
     else:
         view_rc = run_command(cmd)
     if not action_flag:

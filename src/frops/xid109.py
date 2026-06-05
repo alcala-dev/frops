@@ -29,6 +29,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from frops.action import BMNTarget
+from frops.colors import cyan, yellow
 
 # Substring search is case-insensitive and tolerant to the common forms:
 #   - "Xid 109"                       (space separator)
@@ -243,5 +244,8 @@ def render_waiting_summary(waiting: list[XID109Candidate]) -> str:
     lines.append("  ".join("-" * w for w in widths))
     for i in range(len(waiting)):
         row = [vs[i] for _, vs in cols]
-        lines.append("  ".join(v.ljust(w) for v, w in zip(row, widths, strict=True)))
+        cells = [v.ljust(w) for v, w in zip(row, widths, strict=True)]
+        cells[0] = yellow(cells[0])  # BMN
+        cells[-1] = cyan(cells[-1])  # HO TICKET
+        lines.append("  ".join(cells))
     return "\n".join(lines)

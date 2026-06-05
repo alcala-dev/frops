@@ -47,24 +47,12 @@ SKU_VIEW_TEMPLATE: Final[str] = (
     f"flcc.coreweave.com/state notin ({_SKU_EXCLUDED_RENDERED})'"
 )
 
-# Shell pipeline appended to the SKU view kubectl command to trim the
-# CRD's 23 wide-format columns down to the 17 fields operators triage on.
-# Indices (1-based) skip:
-#   $12 RETURN-WORKFLOW
-#   $13 RETURN-STATE
-#   $14 RETURN-STEP
-#   $15 PREV-WORKFLOW-STEP
-#   $17 NEXT-WORKFLOW-STEP
-#   $20 NEXT-STATE
-# `column -t` reflows the awk output into aligned columns. The terminal's
-# auto-wrap mode is toggled off around this command in cli.py so wide rows
-# don't break across multiple visual lines.
-# Trade-off vs. plain wide: kubecolor's ANSI colors are lost because the
-# pipe disables the child's TTY detection. Data is unchanged.
-SKU_VIEW_COLUMN_PIPELINE: Final[str] = (
-    "awk '{print $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, "
-    "$16, $18, $19, $21, $22, $23}' | column -t"
-)
+# Note: the SKU view used to append a shell pipeline (awk + column -t)
+# to subset the CRD's 23 wide columns. That broke on rows with an empty
+# CW-NODE — awk's default field splitter collapses runs of whitespace,
+# shifting every column left. The pipeline is gone; the view is now
+# captured + parsed in Python by `frops.view_table.render_sku_view_table`,
+# which handles empty cells, truncates long columns, and applies colors.
 
 # Same selector, JSON output. Used by '--action' to fetch structured BMN
 # data (CW-NODE, labels) alongside the colored human display.

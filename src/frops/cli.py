@@ -159,7 +159,23 @@ def handle_view(args: argparse.Namespace) -> int:
             print(note)
         return 0
 
-    view_rc = run_command(cmd)
+    # SKU view rows are wider than most terminals. Toggle the terminal's
+    # auto-wrap mode off so long rows truncate at the right edge instead of
+    # breaking across multiple visual lines. Terminals that keep the full
+    # row in scrollback (iTerm2, tmux, …) let the operator scroll right;
+    # in plainer terminals the overflow is visually clipped. try/finally
+    # guarantees the wrap state is restored even on Ctrl-C / subprocess
+    # error so the following plan + prompt render normally.
+    if args.fail_type == "sku":
+        sys.stdout.write("\033[?7l")  # DEC private: disable auto-wrap
+        sys.stdout.flush()
+        try:
+            view_rc = run_command(cmd)
+        finally:
+            sys.stdout.write("\033[?7h")  # DEC private: re-enable auto-wrap
+            sys.stdout.flush()
+    else:
+        view_rc = run_command(cmd)
     if not action_flag:
         return view_rc
 

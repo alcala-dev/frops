@@ -916,6 +916,151 @@ def _xid109_bmns_wide(actionable_state: str = "triage", waiting_state: str = "tr
     )
 
 
+# ----------------------------- view sku --action DRIVE_INSPECT --------------
+
+
+_DRIVE_INSPECT_BMN_JSON = json.dumps(
+    {
+        "items": [
+            {
+                "metadata": {
+                    "name": "bmn-needs-drives",
+                    "labels": {
+                        "ds.coreweave.com/sku.cw-sku": "GPU-GH200-01",
+                        "ds.coreweave.com/status.asset.serial": "SN-NEEDS-DRIVES",
+                        "ds.coreweave.com/physical-topology.region": "RNO2",
+                    },
+                },
+                "status": {"reportedNodeInfo": {"nodeName": "g-drives"}},
+            },
+            {
+                "metadata": {
+                    "name": "bmn-already-ticketed",
+                    "labels": {
+                        "ds.coreweave.com/sku.cw-sku": "GPU-GH200-01",
+                        "ds.coreweave.com/status.asset.serial": "SN-ALREADY",
+                        "ds.coreweave.com/physical-topology.region": "RNO2",
+                    },
+                },
+                "status": {"reportedNodeInfo": {"nodeName": "g-already"}},
+            },
+        ]
+    }
+)
+
+
+def _awx_with_cw0810() -> str:
+    """Mimic the operator's documented CW0810 form so the parser picks it up."""
+    return (
+        "Node:       SN\n"
+        "Job Status: failed\n\n"
+        "cw_error_codes={\n"
+        "  CW0810: No drives were detected. https://coreweave.atlassian.net/wiki/x/8AdyF\n"
+        "}\n"
+    )
+
+
+def test_main_view_sku_action_drive_inspect_files_dct_ticket_when_no_existing_do(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two GH200 BMNs both have CW0810. JIRA returns an existing DO ticket
+    for one of them (DO-77) and nothing for the other. Selecting `d` runs
+    the cwctl ticket creation ONLY for the un-ticketed BMN."""
+    monkeypatch.setenv("JIRA_EMAIL", "me@x.com")
+    monkeypatch.setenv("JIRA_TOKEN", "tok")
+
+    def _capture(cmd: str, **_kwargs: object) -> tuple[str, int]:
+        if "kubectl get bmns -o json" in cmd:
+            return (_DRIVE_INSPECT_BMN_JSON, 0)
+        if cmd.startswith("awxstat"):
+            return (_awx_with_cw0810(), 0)
+        return ("", 0)
+
+    monkeypatch.setattr("frops.cli.capture_command", _capture)
+
+    run_calls: list[str] = []
+    monkeypatch.setattr(
+        "frops.cli.run_command",
+        lambda cmd: run_calls.append(cmd) or 0,  # type: ignore[func-returns-value]
+    )
+
+    class _FakeJIRA:
+        def __init__(self) -> None:
+            pass
+
+        def search(self, jql: str) -> list[object]:
+            from frops.jira import JIRAIssue
+
+            # Only the second BMN has an existing DO ticket.
+            if "bmn-already-ticketed" in jql or "SN-ALREADY" in jql or "g-already" in jql:
+                return [JIRAIssue(key="DO-77", summary="...", status="Closed")]
+            return []
+
+    monkeypatch.setattr("frops.cli.JIRAClient", _FakeJIRA)
+    monkeypatch.setattr("builtins.input", lambda _p: "d")
+
+    rc = main(["view", "sku", "GPU-GH200-01", "--action"])
+    out = capsys.readouterr().out
+    assert rc == 0
+
+    # 1. Resolution block surfaces the BMN that already has a DO ticket.
+    assert "=== Existing DO tickets / unchecked" in out
+    assert "bmn-already-ticketed" in out
+    assert "DO-77" in out
+    # The un-ticketed BMN should NOT appear in the resolution block.
+    bmn_already_idx = out.index("bmn-already-ticketed")
+    plan_idx = out.index("=== Planned actions ===")
+    # The resolution block precedes the plan; bmn-needs-drives should
+    # appear inside the plan, not the resolution block.
+    assert bmn_already_idx < plan_idx
+    assert "[drive-inspect] 1 node(s)" in out
+    assert "bmn-needs-drives" in out
+
+    # 2. Selecting `d` runs the cwctl ticket command for the un-ticketed
+    # BMN only — the other got downgraded to NOOP by the resolver.
+    dct_calls = [c for c in run_calls if "cwctl ticket dct-action" in c]
+    assert any("SN-NEEDS-DRIVES" in c for c in dct_calls), dct_calls
+    assert not any("SN-ALREADY" in c for c in dct_calls), dct_calls
+    # Region from the label flows into the -r flag.
+    assert any("-r RNO2" in c for c in dct_calls)
+
+
+def test_main_view_sku_action_drive_inspect_skips_when_jira_unavailable(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No JIRA creds → resolver defensively downgrades DRIVE_INSPECT to
+    NOOP for every eligible BMN (creating duplicate DO tickets is worse
+    than skipping for one cycle)."""
+    monkeypatch.delenv("JIRA_EMAIL", raising=False)
+    monkeypatch.delenv("JIRA_TOKEN", raising=False)
+
+    def _capture(cmd: str, **_kwargs: object) -> tuple[str, int]:
+        if "kubectl get bmns -o json" in cmd:
+            return (_DRIVE_INSPECT_BMN_JSON, 0)
+        if cmd.startswith("awxstat"):
+            return (_awx_with_cw0810(), 0)
+        return ("", 0)
+
+    monkeypatch.setattr("frops.cli.capture_command", _capture)
+    run_calls: list[str] = []
+    monkeypatch.setattr(
+        "frops.cli.run_command",
+        lambda cmd: run_calls.append(cmd) or 0,  # type: ignore[func-returns-value]
+    )
+    monkeypatch.setattr("builtins.input", lambda _p: "")
+
+    rc = main(["view", "sku", "GPU-GH200-01", "--action"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    # Both BMNs end up in the resolution block as "skipped".
+    assert "=== Existing DO tickets / unchecked (2) ===" in out
+    assert "JIRA credentials missing" in out
+    # No cwctl ticket commands ran.
+    assert not any("cwctl ticket dct-action" in c for c in run_calls), run_calls
+
+
 def test_main_view_sku_action_xid109_pipeline_runs_via_x_selection(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,

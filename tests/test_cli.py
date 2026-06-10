@@ -960,6 +960,148 @@ def _awx_with_cw0810() -> str:
     )
 
 
+# ----------------------------- view sku --action IBP_RESEAT -----------------
+
+
+_IBP_BMN_JSON = json.dumps(
+    {
+        "items": [
+            {
+                "metadata": {
+                    "name": "bmn-needs-ibp",
+                    "labels": {
+                        "ds.coreweave.com/sku.cw-sku": "GPU-H100-02",
+                        "ds.coreweave.com/status.asset.serial": "SN-IBP",
+                        "ds.coreweave.com/physical-topology.zone": "RNO2A",
+                    },
+                },
+                "status": {"reportedNodeInfo": {"nodeName": "g1cb982"}},
+            },
+            {
+                "metadata": {
+                    "name": "bmn-ibp-old",
+                    "labels": {
+                        "ds.coreweave.com/sku.cw-sku": "GPU-H100-02",
+                        "ds.coreweave.com/status.asset.serial": "SN-IBP-EXISTING",
+                        "ds.coreweave.com/physical-topology.zone": "RNO2A",
+                    },
+                },
+                "status": {"reportedNodeInfo": {"nodeName": "g2dde99"}},
+            },
+        ]
+    }
+)
+
+
+_IBP_BMNS_WIDE_OUTPUT = (
+    "NAME             DEVICESLOT  CW-NODE   EXISTS  ONLINE  CW-SKU         BMC-IP  OWNER  "
+    "CLUSTER  CWNC-STATE  WORKFLOW  RETURN-WORKFLOW  RETURN-STATE  RETURN-STEP  PREV-WORKFLOW-STEP  "
+    "WORKFLOW-STEP  NEXT-WORKFLOW-STEP  PREV-STATE  STATE   NEXT-STATE  TS    ORG-ID  NODE-PROFILE\n"
+    "bmn-needs-ibp    slot-a      g1cb982   true    true    GPU-H100-02    -       -      "
+    "-        triage      orphan    empty            empty         empty        prod                "
+    "empty          empty               prod        triage  empty       1h    org-x   profile-y\n"
+    "bmn-ibp-old      slot-b      g2dde99   true    true    GPU-H100-02    -       -      "
+    "-        triage      orphan    empty            empty         empty        prod                "
+    "empty          empty               prod        triage  empty       1h    org-x   profile-y\n"
+)
+
+
+def test_main_view_sku_action_ibp_reseat_files_dct_when_no_open_do_ticket(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two triage BMNs both have an HO ticket mentioning ibp + reach nlcc
+    phase. JIRA DO returns an open ticket for one and nothing for the
+    other. Selecting `i` runs the cwctl ticket only for the un-ticketed
+    BMN; the other surfaces in the IBP-skipped block."""
+    monkeypatch.setenv("JIRA_EMAIL", "me@x.com")
+    monkeypatch.setenv("JIRA_TOKEN", "tok")
+
+    def _capture(cmd: str, **_kwargs: object) -> tuple[str, int]:
+        # Order matters: kubectl jsonpath check first (kubectl get bmn ...)
+        # so the broader `-o json` clause doesn't swallow it.
+        if cmd.startswith("kubectl get bmn bmn-needs-ibp"):
+            return ("nlcc", 0)
+        if cmd.startswith("kubectl get bmn bmn-ibp-old"):
+            return ("nlcc", 0)
+        if "kubectl get bmns -o json" in cmd:
+            return (_IBP_BMN_JSON, 0)
+        if cmd.startswith("awxstat"):
+            # HO ticket flow only — no CW codes; this puts every BMN in
+            # NOOP classify which the IBP pipeline can then promote.
+            return ("cw_error_codes={}\n", 0)
+        if cmd.startswith("bmns -o wide"):
+            return (_IBP_BMNS_WIDE_OUTPUT, 0)
+        return ("", 0)
+
+    monkeypatch.setattr("frops.cli.capture_command", _capture)
+
+    run_calls: list[str] = []
+    monkeypatch.setattr(
+        "frops.cli.run_command",
+        lambda cmd: run_calls.append(cmd) or 0,  # type: ignore[func-returns-value]
+    )
+
+    class _FakeJIRA:
+        def __init__(self) -> None:
+            pass
+
+        def search(self, jql: str) -> list[object]:
+            from frops.jira import JIRAIssue
+
+            if f"project = {'DO'}" in jql:
+                # DO project query — only the second BMN has an open match.
+                if "bmn-ibp-old" in jql or "SN-IBP-EXISTING" in jql or "g2dde99" in jql:
+                    return [JIRAIssue(key="DO-101", summary="...", status="In Progress")]
+                return []
+            # Otherwise this is the HO project search — return a hit for
+            # every node so the description filter is what gates the path.
+            if "bmn-needs-ibp" in jql or "SN-IBP" in jql or "g1cb982" in jql:
+                return [JIRAIssue(key="HO-1001", summary="...", status="Awaiting Support")]
+            if "bmn-ibp-old" in jql or "g2dde99" in jql:
+                return [JIRAIssue(key="HO-1002", summary="...", status="Awaiting Support")]
+            return []
+
+        def fetch_description(self, key: str) -> str:
+            # Both HO tickets mention ibp; only bmn-needs-ibp picks a
+            # specific number (so we can assert ibp2 makes it into the
+            # cwctl command).
+            if key == "HO-1001":
+                return "Node g1cb982 ibp2 has flapped multiple times"
+            if key == "HO-1002":
+                return "Alert triggered IBMultipleFlaps for g2dde99"
+            return ""
+
+        def append_to_description(self, _key: str, _block: str) -> None:
+            raise AssertionError("IBP_RESEAT path doesn't write to JIRA")
+
+    monkeypatch.setattr("frops.cli.JIRAClient", _FakeJIRA)
+    monkeypatch.setattr("builtins.input", lambda _p: "i")
+
+    rc = main(["view", "sku", "GPU-H100-02", "--action"])
+    out = capsys.readouterr().out
+    assert rc == 0
+
+    # 1. Skipped block surfaces the BMN with an existing open DO ticket.
+    assert "=== IBP reseat candidates skipped (1) ===" in out
+    assert "bmn-ibp-old" in out
+    assert "DO-101" in out
+
+    # 2. The un-ticketed BMN appears in the plan under IBP_RESEAT.
+    assert "[ibp-reseat] 1 node(s)" in out
+    assert "bmn-needs-ibp" in out
+
+    # 3. Selecting `i` runs the cwctl ticket command for the un-ticketed
+    # BMN only — the other was downgraded to NOOP by the resolver.
+    dct_calls = [c for c in run_calls if "cwctl ticket dct-action network" in c]
+    assert any("SN-IBP" in c and "SN-IBP-EXISTING" not in c for c in dct_calls), dct_calls
+    assert not any("SN-IBP-EXISTING" in c for c in dct_calls), dct_calls
+    # ibp2 from the HO description flows into the message verbatim.
+    assert any("ibp2 down" in c for c in dct_calls)
+    # Zone from the label populates the -r flag (RNO2A, not RNO2).
+    assert any("-r RNO2A" in c for c in dct_calls)
+
+
 def test_main_view_sku_action_drive_inspect_files_dct_ticket_when_no_existing_do(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,

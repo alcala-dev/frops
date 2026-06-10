@@ -43,6 +43,11 @@ class ActionKind(str, Enum):
     # downgrades this to NOOP when an existing DO ticket about drives for
     # the node already exists (open OR closed), so we don't duplicate.
     DRIVE_INSPECT = "drive-inspect"
+    # Set by the IBP reseat pipeline (frops.ibp_reseat) when a triage BMN
+    # has an HO ticket mentioning ibp issues + PhaseState reason=nlcc + no
+    # existing open DO ticket about ibp work. Remediation is a
+    # `cwctl ticket dct-action network ...` for onsite reseat/clean.
+    IBP_RESEAT = "ibp-reseat"
     NOOP = "noop"
 
 
@@ -252,6 +257,7 @@ def render_plan(actions: list[PlannedAction]) -> str:
         ActionKind.HO_TICKET,
         ActionKind.XID_109_RETURN_TO_READY,
         ActionKind.DRIVE_INSPECT,
+        ActionKind.IBP_RESEAT,
         ActionKind.NOOP,
     ):
         bucket = by_kind.get(kind, [])

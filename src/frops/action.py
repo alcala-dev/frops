@@ -81,9 +81,11 @@ class BMNTarget:
     workflow: str = ""
     workflow_step: str = ""
     state: str = ""
-    # Pulled from `ds.coreweave.com/physical-topology.region` label. Required
-    # by the DRIVE_INSPECT action to render the `-r <REGION>` flag on the
-    # `cwctl ticket dct-action` invocation. Empty when the label is absent.
+    # Source of the `-r <REGION>` flag on the `cwctl ticket dct-action`
+    # invocation built by the DRIVE_INSPECT action. Pulled from the
+    # `ds.coreweave.com/physical-topology.zone` label (NOT `.region`) —
+    # cwctl's ticket region is the granular zone string (e.g. `RNO2A`,
+    # not `RNO2`). Empty when the label is absent.
     region: str = ""
 
     @property

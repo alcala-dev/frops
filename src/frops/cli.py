@@ -675,7 +675,11 @@ def _build_targets(
         workflow = labels.get("flcc.coreweave.com/workflow", "")
         workflow_step = labels.get("flcc.coreweave.com/workflow-step", "")
         state = labels.get("flcc.coreweave.com/state", "")
-        region = labels.get("ds.coreweave.com/physical-topology.region", "")
+        # The `physical-topology.region` label is too coarse for cwctl's
+        # ticket `-r` flag (e.g. it's `RNO2` when the ticket system expects
+        # `RNO2A`). Use the zone label, which carries the granular value
+        # cwctl's region argument actually wants.
+        region = labels.get("ds.coreweave.com/physical-topology.zone", "")
 
         if not reported_node:
             missing_cwnode.append(

@@ -928,7 +928,7 @@ _DRIVE_INSPECT_BMN_JSON = json.dumps(
                     "labels": {
                         "ds.coreweave.com/sku.cw-sku": "GPU-GH200-01",
                         "ds.coreweave.com/status.asset.serial": "SN-NEEDS-DRIVES",
-                        "ds.coreweave.com/physical-topology.region": "RNO2",
+                        "ds.coreweave.com/physical-topology.zone": "RNO2A",
                     },
                 },
                 "status": {"reportedNodeInfo": {"nodeName": "g-drives"}},
@@ -939,7 +939,7 @@ _DRIVE_INSPECT_BMN_JSON = json.dumps(
                     "labels": {
                         "ds.coreweave.com/sku.cw-sku": "GPU-GH200-01",
                         "ds.coreweave.com/status.asset.serial": "SN-ALREADY",
-                        "ds.coreweave.com/physical-topology.region": "RNO2",
+                        "ds.coreweave.com/physical-topology.zone": "RNO2A",
                     },
                 },
                 "status": {"reportedNodeInfo": {"nodeName": "g-already"}},
@@ -1022,8 +1022,11 @@ def test_main_view_sku_action_drive_inspect_files_dct_ticket_when_no_existing_do
     dct_calls = [c for c in run_calls if "cwctl ticket dct-action" in c]
     assert any("SN-NEEDS-DRIVES" in c for c in dct_calls), dct_calls
     assert not any("SN-ALREADY" in c for c in dct_calls), dct_calls
-    # Region from the label flows into the -r flag.
-    assert any("-r RNO2" in c for c in dct_calls)
+    # The granular zone from the label (RNO2A, not the coarser region
+    # value RNO2) flows into the cwctl ticket `-r` flag.
+    assert any("-r RNO2A" in c for c in dct_calls)
+    # Sanity: the coarser RNO2-only value never reaches the command.
+    assert not any(c.rstrip().endswith("-r RNO2") for c in dct_calls)
 
 
 def test_main_view_sku_action_drive_inspect_skips_when_jira_unavailable(

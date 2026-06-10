@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- DRIVE_INSPECT's `cwctl ticket -r <REGION>` value now comes from the
+  BMN's `ds.coreweave.com/physical-topology.zone` label (e.g. `RNO2A`),
+  not `…/physical-topology.region` (e.g. `RNO2`). cwctl's ticket region
+  is the granular zone string. The `BMNTarget.region` field name is
+  unchanged because it describes "what cwctl expects in -r" — only the
+  source label moves.
+
 ### Added
 - **Drive-inspect DCT ticket workflow** for `view sku --action`. When a
   GH200 BMN reports `CW0810: No drives were detected` in AWX, the

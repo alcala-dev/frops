@@ -45,6 +45,15 @@ from frops.drive_inspect import (
 from frops.drive_inspect import (
     build_search_jql as build_do_search_jql,
 )
+from frops.ibp_reseat import (
+    IBPReseatCandidate,
+    apply_ibp_reseat_overrides,
+    collect_ibp_reseat_candidates,
+    render_ibp_skipped_summary,
+)
+from frops.ibp_reseat import (
+    build_do_search_jql as build_ibp_do_search_jql,
+)
 from frops.jira import (
     DEFAULT_PROJECT as JIRA_PROJECT,
 )
@@ -266,6 +275,22 @@ def _run_sku_action_plan(sku: str, user_filter: str | None, *, auto_yes: bool = 
         print()
         print(_render_drive_inspect_resolutions(drive_resolutions))
 
+    # IBP reseat pipeline: triage BMNs with an HO ticket mentioning ibp +
+    # PhaseState reason=nlcc become IBP_RESEAT (file a new DO ticket via
+    # `cwctl ticket dct-action network …`), or get downgraded to NOOP when
+    # an open DO ibp/reseat/fiber ticket already exists for the node.
+    # Mirrors the XID-109 stage in that it filters by triage + HO desc +
+    # nlcc phase, and the DRIVE_INSPECT stage in that it dedups against
+    # the DO project. Power-drain / drive-inspect / xid-109 still win
+    # for BMNs that qualify for multiple paths.
+    ibp_candidates = _maybe_run_ibp_reseat_pipeline(actions, targets, jira_client)
+    if ibp_candidates:
+        actions = apply_ibp_reseat_overrides(actions, ibp_candidates)
+        skipped = render_ibp_skipped_summary(ibp_candidates)
+        if skipped:
+            print()
+            print(skipped)
+
     print()
     print(render_plan(actions))
 
@@ -386,6 +411,92 @@ def _render_drive_inspect_resolutions(resolutions: list[DriveInspectResolution])
         else:
             lines.append(f"  - {r.bmn}  →  (skipped: {r.error})")
     return "\n".join(lines)
+
+
+def _maybe_run_ibp_reseat_pipeline(
+    actions: list[PlannedAction],
+    targets: list[BMNTarget],
+    jira_client: JIRAClient | None,
+) -> list[IBPReseatCandidate]:
+    """Return all IBP candidates (actionable + skipped), or [] when skipped.
+
+    Like the XID-109 pipeline, this only runs when:
+      - JIRA is available (the HO search requires it), AND
+      - at least one target is currently in a non-power-drain action
+        class — power-drain / drive-inspect / xid-109 results are higher
+        precedence and the resolver wouldn't replace them anyway.
+
+    Per-stage failures (HO search, description fetch, JIRA error on the
+    DO query) bubble through the injected closures so the resolver can
+    surface them in the skip block.
+    """
+    if jira_client is None:
+        return []
+
+    eligible_targets = [
+        t
+        for t in targets
+        if not any(
+            a.bmn == t.bmn
+            and a.kind
+            in (
+                ActionKind.POWER_DRAIN,
+                ActionKind.DRIVE_INSPECT,
+                ActionKind.XID_109_RETURN_TO_READY,
+            )
+            for a in actions
+        )
+    ]
+    if not eligible_targets:
+        return []
+
+    cwnc_states = _fetch_cwnc_states([t.bmn for t in eligible_targets])
+    if not cwnc_states:
+        return []
+
+    def _ho_search(identifiers: tuple[str, ...]) -> str | None:
+        try:
+            jql = build_search_jql(JIRA_PROJECT, identifiers, JIRA_OPEN_STATUSES)
+            issues = jira_client.search(jql)
+        except (JIRAError, ValueError) as exc:
+            print(
+                f"warning: IBP-reseat HO search failed for {identifiers}: {exc}",
+                file=sys.stderr,
+            )
+            return None
+        return issues[0].key if issues else None
+
+    def _fetch_desc(issue_key: str) -> str:
+        try:
+            return jira_client.fetch_description(issue_key)
+        except JIRAError as exc:
+            print(
+                f"warning: IBP-reseat description fetch failed for {issue_key}: {exc}",
+                file=sys.stderr,
+            )
+            return ""
+
+    def _fetch_phase(bmn: str) -> str:
+        return fetch_phase_reason(bmn, capture_command)
+
+    def _do_search(identifiers: tuple[str, ...]) -> tuple[str | None, str | None]:
+        jql = build_ibp_do_search_jql(identifiers)
+        if jql is None:
+            return None, None
+        try:
+            issues = jira_client.search(jql)
+        except JIRAError as exc:
+            return None, str(exc)
+        return (issues[0].key if issues else None, None)
+
+    return collect_ibp_reseat_candidates(
+        eligible_targets,
+        cwnc_states,
+        ho_search=_ho_search,
+        fetch_description=_fetch_desc,
+        fetch_phase=_fetch_phase,
+        do_search=_do_search,
+    )
 
 
 def _maybe_run_xid109_pipeline(
@@ -604,6 +715,15 @@ def _prompt_group_selection(
                 ActionKind.DRIVE_INSPECT,
                 "[d]rives-ticket",
                 counts_by_kind[ActionKind.DRIVE_INSPECT],
+            )
+        )
+    if ActionKind.IBP_RESEAT in counts_by_kind:
+        options.append(
+            (
+                "i",
+                ActionKind.IBP_RESEAT,
+                "[i]bp-reseat",
+                counts_by_kind[ActionKind.IBP_RESEAT],
             )
         )
     if access_targets:

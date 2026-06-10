@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **IBP reseat DCT ticket workflow** for `view sku --action`. Mirrors the
+  XID-109 state-machine trigger (CWNC-STATE = `triage` + PhaseState
+  reason = `nlcc`) plus an HO ticket whose description mentions ibp
+  issues (`ibp`, `ibp2`-style, or the `IBMultipleFlaps` alert reason).
+  Surviving candidates become `ActionKind.IBP_RESEAT` with a rendered
+  `cwctl ticket dct-action network <SERIAL> -m "ibpN down. Please
+  reseat and clean ibpN on node …" -r <ZONE>` command. The specific
+  ibp interface (e.g. `ibp2`) is extracted from the HO description;
+  falls back to generic `ibp` when no number is present.
+- DO project dedup against **open** tickets only (`statusCategory !=
+  Done`) so a previously-closed reseat doesn't suppress a new flap.
+  If an open DO ticket about ibp / reseat / fiber for the node exists,
+  the candidate is downgraded to NOOP and surfaced in a new
+  `=== IBP reseat candidates skipped (N) ===` block above the plan.
+  JIRA outages (failed query) trigger the same defensive downgrade.
+- New `ActionKind.IBP_RESEAT` + prompt letter `[i]bp-reseat`. Combos
+  work (`i` alone, `a` for all, `p,i` to combine with power-drain).
+  Precedence:
+  `POWER_DRAIN > DRIVE_INSPECT > XID_109_RETURN_TO_READY > IBP_RESEAT > HO_TICKET > NOOP`.
+- New `frops.ibp_reseat` module: pure-functional, capture-injected.
+  `description_mentions_ibp`, `find_ibp_label_in_description`,
+  `build_do_search_jql`, `collect_ibp_reseat_candidates`, and
+  `apply_ibp_reseat_overrides` are all individually testable.
+
 ### Fixed
 - DRIVE_INSPECT's `cwctl ticket -r <REGION>` value now comes from the
   BMN's `ds.coreweave.com/physical-topology.zone` label (e.g. `RNO2A`),

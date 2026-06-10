@@ -38,6 +38,13 @@ from frops.catalog import (
     SKU_VIEW_TEMPLATE_JSON,
 )
 from frops.commands import capture_command, run_command
+from frops.drive_inspect import (
+    DriveInspectResolution,
+    resolve_drive_inspect,
+)
+from frops.drive_inspect import (
+    build_search_jql as build_do_search_jql,
+)
 from frops.jira import (
     DEFAULT_PROJECT as JIRA_PROJECT,
 )
@@ -248,6 +255,17 @@ def _run_sku_action_plan(sku: str, user_filter: str | None, *, auto_yes: bool = 
         print()
         print(render_waiting_summary(xid109_waiting))
 
+    # Drive-inspect dedup: for DRIVE_INSPECT actions (CW0810 on GH200),
+    # check the DO project for an existing ticket about drive inspect/
+    # install for the node. If one exists (open OR closed) — or if JIRA
+    # is unreachable — downgrade to NOOP so we don't risk creating a
+    # duplicate DO ticket. The CLI surfaces the existing-ticket key in a
+    # short informational block above the plan.
+    actions, drive_resolutions = _maybe_resolve_drive_inspect(actions, targets_by_bmn, jira_client)
+    if drive_resolutions:
+        print()
+        print(_render_drive_inspect_resolutions(drive_resolutions))
+
     print()
     print(render_plan(actions))
 
@@ -307,6 +325,67 @@ def _try_make_jira_client() -> JIRAClient | None:
     except JIRAError as exc:
         print(f"\nnote: JIRA lookup disabled — {exc}", file=sys.stderr)
         return None
+
+
+def _maybe_resolve_drive_inspect(
+    actions: list[PlannedAction],
+    targets_by_bmn: dict[str, BMNTarget],
+    jira_client: JIRAClient | None,
+) -> tuple[list[PlannedAction], list[DriveInspectResolution]]:
+    """Run the DO ticket dedup pass over any DRIVE_INSPECT actions.
+
+    Pre-flight returns the input list unchanged when there are no
+    DRIVE_INSPECT actions to resolve (cheap exit) or when JIRA can't be
+    constructed. In the latter case we downgrade every DRIVE_INSPECT to
+    NOOP defensively — creating a duplicate DO ticket is more painful
+    than skipping for one cycle, so the operator gets a clear note
+    pointing at the JIRA outage. Per-BMN search errors are funneled
+    through the same defensive path.
+    """
+    if not any(a.kind is ActionKind.DRIVE_INSPECT for a in actions):
+        return actions, []
+
+    if jira_client is None:
+        # Mark every DRIVE_INSPECT as "skipped due to JIRA unavailable"
+        # using the resolver itself with a stub that reports the error.
+        return resolve_drive_inspect(
+            actions,
+            targets_by_bmn,
+            search_fn=lambda _ids: (None, "JIRA credentials missing"),
+        )
+
+    def _search(identifiers: tuple[str, ...]) -> tuple[str | None, str | None]:
+        jql = build_do_search_jql(identifiers)
+        if jql is None:
+            return None, None
+        try:
+            issues = jira_client.search(jql)
+        except JIRAError as exc:
+            return None, str(exc)
+        return (issues[0].key if issues else None, None)
+
+    return resolve_drive_inspect(actions, targets_by_bmn, search_fn=_search)
+
+
+def _render_drive_inspect_resolutions(resolutions: list[DriveInspectResolution]) -> str:
+    """Short info block listing BMNs whose DO ticket already existed (or
+    couldn't be checked). Empty when nothing was skipped."""
+    if not resolutions:
+        return ""
+    lines: list[str] = [
+        f"=== Existing DO tickets / unchecked ({len(resolutions)}) ===",
+        "",
+        "BMNs eligible for a drive-inspect DO ticket where one already",
+        "exists (or the DO project couldn't be queried). These BMNs are",
+        "downgraded to NOOP — no new ticket will be created.",
+        "",
+    ]
+    for r in resolutions:
+        if r.existing_ticket:
+            lines.append(f"  - {r.bmn}  →  {r.existing_ticket}")
+        else:
+            lines.append(f"  - {r.bmn}  →  (skipped: {r.error})")
+    return "\n".join(lines)
 
 
 def _maybe_run_xid109_pipeline(
@@ -518,6 +597,15 @@ def _prompt_group_selection(
                 counts_by_kind[ActionKind.XID_109_RETURN_TO_READY],
             )
         )
+    if ActionKind.DRIVE_INSPECT in counts_by_kind:
+        options.append(
+            (
+                "d",
+                ActionKind.DRIVE_INSPECT,
+                "[d]rives-ticket",
+                counts_by_kind[ActionKind.DRIVE_INSPECT],
+            )
+        )
     if access_targets:
         # ActionKind.NOOP would be misleading — NOOP actions have no command.
         # The `n` letter triggers the diagnostic access check pass instead.
@@ -587,6 +675,7 @@ def _build_targets(
         workflow = labels.get("flcc.coreweave.com/workflow", "")
         workflow_step = labels.get("flcc.coreweave.com/workflow-step", "")
         state = labels.get("flcc.coreweave.com/state", "")
+        region = labels.get("ds.coreweave.com/physical-topology.region", "")
 
         if not reported_node:
             missing_cwnode.append(
@@ -599,6 +688,7 @@ def _build_targets(
                     workflow=workflow,
                     workflow_step=workflow_step,
                     state=state,
+                    region=region,
                 )
             )
             continue
@@ -614,6 +704,7 @@ def _build_targets(
                 workflow=workflow,
                 workflow_step=workflow_step,
                 state=state,
+                region=region,
             )
         )
 

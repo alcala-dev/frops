@@ -37,12 +37,23 @@ class ActionKind(str, Enum):
     # an open HO ticket mentioning XID 109, and PhaseState reason=nlcc. The
     # remediation is `cwctl flcc node -w return-to-ready ...`.
     XID_109_RETURN_TO_READY = "xid-109-return-to-ready"
+    # Set when a BMN reports `CW0810: No drives detected` in AWX on an
+    # eligible SKU. The remediation is to file a DCT ticket (project DO)
+    # requesting onsite drive inspection / install. `frops.drive_inspect`
+    # downgrades this to NOOP when an existing DO ticket about drives for
+    # the node already exists (open OR closed), so we don't duplicate.
+    DRIVE_INSPECT = "drive-inspect"
     NOOP = "noop"
 
 
 POWER_DRAIN_CODES: frozenset[str] = frozenset({"CW0211", "CW0102"})
 POWER_DRAIN_ELIGIBLE_SKUS: frozenset[str] = frozenset({"GPU-GH200-01"})
 HO_TICKET_CODES: frozenset[str] = frozenset({"CW0201"})
+# CW0810: AWX reports "No drives were detected" — node needs onsite
+# inspection or drive install. Eligible on GH200 only for now; add SKUs
+# to the frozenset below to extend.
+DRIVE_NOT_DETECTED_CODES: frozenset[str] = frozenset({"CW0810"})
+DRIVE_INSPECT_ELIGIBLE_SKUS: frozenset[str] = frozenset({"GPU-GH200-01"})
 
 
 @dataclass(frozen=True)
@@ -70,6 +81,10 @@ class BMNTarget:
     workflow: str = ""
     workflow_step: str = ""
     state: str = ""
+    # Pulled from `ds.coreweave.com/physical-topology.region` label. Required
+    # by the DRIVE_INSPECT action to render the `-r <REGION>` flag on the
+    # `cwctl ticket dct-action` invocation. Empty when the label is absent.
+    region: str = ""
 
     @property
     def search_identifiers(self) -> tuple[str, ...]:
@@ -122,6 +137,23 @@ def _return_to_triage_command(bmn: str) -> str:
     )
 
 
+def _drive_inspect_command(cw_node: str, serial: str, region: str) -> str:
+    """Render the cwctl ticket creation for an onsite drive inspect/install.
+
+    Mirrors the operator's documented form:
+      cwctl ticket dct-action device <SERIAL>
+            -m "Drives not detected in chassis. Please inspect and/or
+                install the missing drive(s) for this GH200 node
+                (<CWNODE> | SN: <SERIAL>)"
+            -r <REGION>
+    """
+    message = (
+        "Drives not detected in chassis. Please inspect and/or install the "
+        f"missing drive(s) for this GH200 node ({cw_node} | SN: {serial})"
+    )
+    return f'cwctl ticket dct-action device {serial} -m "{message}" -r {region}'
+
+
 def classify(target: BMNTarget) -> PlannedAction:
     """Return the planned action for one BMN target.
 
@@ -143,6 +175,30 @@ def classify(target: BMNTarget) -> PlannedAction:
                 triggering_codes=tuple(matching),
                 command=_power_drain_command(target.bmn, code),
                 notes=f"Detected {', '.join(matching)} on a {target.sku} node",
+            )
+
+    # Drive-inspect comes after power-drain (which is the more generic
+    # remediation; if a node has both, power-drain runs first and the drive
+    # issue persists in the next pass) but before HO-ticket — onsite drive
+    # work needs to be scheduled before any administrative escalation.
+    if target.sku in DRIVE_INSPECT_ELIGIBLE_SKUS:
+        matching = sorted(codes_present & DRIVE_NOT_DETECTED_CODES)
+        if matching:
+            return PlannedAction(
+                bmn=target.bmn,
+                cw_node=target.cw_node,
+                sku=target.sku,
+                kind=ActionKind.DRIVE_INSPECT,
+                triggering_codes=tuple(matching),
+                command=_drive_inspect_command(
+                    cw_node=target.cw_node,
+                    serial=target.serial,
+                    region=target.region,
+                ),
+                notes=(
+                    f"Detected {', '.join(matching)} — will file a DO ticket "
+                    "for onsite drive inspect/install unless one already exists."
+                ),
             )
 
     if codes_present & HO_TICKET_CODES:
@@ -193,6 +249,7 @@ def render_plan(actions: list[PlannedAction]) -> str:
         ActionKind.POWER_DRAIN,
         ActionKind.HO_TICKET,
         ActionKind.XID_109_RETURN_TO_READY,
+        ActionKind.DRIVE_INSPECT,
         ActionKind.NOOP,
     ):
         bucket = by_kind.get(kind, [])

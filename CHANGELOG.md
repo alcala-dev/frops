@@ -8,6 +8,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Drive-inspect DCT ticket workflow** for `view sku --action`. When a
+  GH200 BMN reports `CW0810: No drives were detected` in AWX, the
+  planner files a DCT ticket via
+  `cwctl ticket dct-action device <SERIAL> -m "..." -r <REGION>` — but
+  only after checking JIRA project `DO` for an existing open OR closed
+  ticket about drive inspect/install for the node, so we don't create
+  duplicates. If a ticket already exists, the action is downgraded to
+  NOOP and the ticket key is surfaced in a new
+  `=== Existing DO tickets / unchecked ===` block above the plan. If
+  JIRA can't be queried at all, every eligible BMN is downgraded
+  defensively (creating a duplicate is worse than skipping for one
+  cycle).
+- New `ActionKind.DRIVE_INSPECT` in `frops.action` and prompt letter
+  `[d]rives-ticket`. Standard prompt combos apply (`d` alone, `a` for
+  all, `p,d` to combine with power-drain). Precedence between
+  classifications:
+  power-drain > drive-inspect > ho-ticket > NOOP.
+- New `frops.drive_inspect` module (pure + injectable, like
+  `frops.xid109`): `build_search_jql(identifiers)` renders the
+  no-status-filter DO project JQL with stemmed drive/install/inspect
+  keywords; `resolve_drive_inspect(actions, targets, search_fn)`
+  applies the dedup pass and returns
+  `(rewritten_actions, [DriveInspectResolution, ...])`.
+- `BMNTarget.region` field (sourced from
+  `ds.coreweave.com/physical-topology.region` label) so the
+  `cwctl ticket` command can render the `-r RNO2`-style flag from
+  the kubectl JSON without an extra round-trip.
+
+### Added
 - `frops.colors` — small TTY-aware ANSI helper (`yellow`/`cyan`/
   `magenta`/`dim`). Respects `NO_COLOR`, `FROPS_NO_COLOR`, and the
   `FROPS_FORCE_COLOR` override for scripted captures. Used by every

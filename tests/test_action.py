@@ -40,12 +40,16 @@ def _target(
     cw_node: str = "g81b512",
     sku: str = "GPU-GH200-01",
     reports: list[AWXReport] | None = None,
+    serial: str = "S900770X4200980",
+    region: str = "RNO2",
 ) -> BMNTarget:
     return BMNTarget(
         bmn=bmn,
         cw_node=cw_node,
         sku=sku,
         awx_reports=tuple(reports or []),
+        serial=serial,
+        region=region,
     )
 
 
@@ -124,6 +128,58 @@ def test_classify_merges_codes_from_multiple_reports() -> None:
     assert action.triggering_codes == ("CW0211",)
 
 
+# --------------------------- DRIVE_INSPECT classify -------------------------
+
+
+def test_classify_cw0810_on_gh200_is_drive_inspect() -> None:
+    target = _target(reports=[_report([("CW0810", "No drives were detected.")])])
+    action = classify(target)
+    assert action.kind is ActionKind.DRIVE_INSPECT
+    assert action.triggering_codes == ("CW0810",)
+    assert action.command is not None
+    # The cwctl ticket uses serial as the device key + region from labels.
+    assert f"cwctl ticket dct-action device {target.serial}" in action.command
+    assert f"-r {target.region}" in action.command
+    # Message references cw-node and serial for context.
+    assert target.cw_node in action.command
+    assert target.serial in action.command
+    assert "Drives not detected" in action.command
+
+
+def test_classify_cw0810_on_non_gh200_sku_is_noop() -> None:
+    """DRIVE_INSPECT is GH200-only for now — other SKUs treat CW0810 as
+    just another non-actionable code (NOOP)."""
+    target = _target(
+        sku="CPU-EPYC-01",
+        reports=[_report([("CW0810", "No drives were detected.")])],
+    )
+    action = classify(target)
+    assert action.kind is ActionKind.NOOP
+    assert "not actionable for SKU CPU-EPYC-01" in action.notes
+
+
+def test_classify_power_drain_wins_over_drive_inspect_when_both_present() -> None:
+    """A node with both CW0211 (power-drain) and CW0810 (drives) on GH200
+    should classify as power-drain — the more generic software remediation
+    runs first; the drive issue persists into the next pass for ticketing."""
+    target = _target(
+        reports=[_report([("CW0211", "bios missing"), ("CW0810", "no drives")])],
+    )
+    action = classify(target)
+    assert action.kind is ActionKind.POWER_DRAIN
+
+
+def test_classify_drive_inspect_wins_over_ho_ticket_when_both_present() -> None:
+    """A node with CW0810 (drives) and CW0201 (HO ticket) on GH200 should
+    classify as drive-inspect — onsite drive work outranks administrative
+    escalation when both are signaled."""
+    target = _target(
+        reports=[_report([("CW0810", "no drives"), ("CW0201", "ho")])],
+    )
+    action = classify(target)
+    assert action.kind is ActionKind.DRIVE_INSPECT
+
+
 # --------------------------- render_plan ------------------------------------
 
 
@@ -143,7 +199,9 @@ def test_render_plan_groups_by_kind_and_shows_totals() -> None:
     assert "[power-drain] 2 node(s)" in rendered
     assert "[ho-ticket] 1 node(s)" in rendered
     assert "[noop] 1 node(s)" in rendered
-    assert "Totals: power-drain=2, ho-ticket=1, xid-109-return-to-ready=0, noop=1" in rendered
+    assert (
+        "Totals: power-drain=2, ho-ticket=1, xid-109-return-to-ready=0, drive-inspect=0, noop=1"
+    ) in rendered
 
 
 def test_render_plan_includes_command_for_actionable_kinds() -> None:

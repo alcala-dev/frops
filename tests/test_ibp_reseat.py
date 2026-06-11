@@ -262,6 +262,43 @@ def test_collect_records_do_search_error_skipping_creation() -> None:
     assert cand.actionable is False
 
 
+def test_collect_is_sku_agnostic() -> None:
+    # The IBP trigger condition is CWNC-STATE + HO description — not SKU.
+    # `classify()` is the only place SKU shows up in this code path
+    # (POWER_DRAIN / DRIVE_INSPECT are GH200-only) and even there a non-
+    # GH200 BMN with no actionable codes still lands on NOOP, which the
+    # override rewrites. This test pins that behavior across SKUs.
+    targets = [
+        _target(bmn=f"bmn-{i}", cw_node=f"g{i}", serial=f"S{i}", sku=sku)
+        for i, sku in enumerate(
+            [
+                "GPU-H100-02",
+                "GPU-H200-01",
+                "GPU-B200-02",
+                "GPU-GB200-01",
+                "GPU-GH200-01",
+            ]
+        )
+    ]
+    candidates = collect_ibp_reseat_candidates(
+        targets,
+        {t.bmn: "triage" for t in targets},
+        ho_search=lambda ids: f"HO-{ids[0]}",
+        fetch_description=lambda _k: "ibp2 has flapped",
+        fetch_phase=lambda _b: "flcc",  # any phase reason — gate was dropped
+        do_search=lambda _ids: (None, None),
+    )
+    assert {c.sku for c in candidates} == {
+        "GPU-H100-02",
+        "GPU-H200-01",
+        "GPU-B200-02",
+        "GPU-GB200-01",
+        "GPU-GH200-01",
+    }
+    assert all(c.actionable for c in candidates)
+    assert all(c.ibp_label == "ibp2" for c in candidates)
+
+
 # --------------------------- apply_ibp_reseat_overrides ---------------------
 
 

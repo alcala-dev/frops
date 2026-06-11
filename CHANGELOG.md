@@ -8,6 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- IBP reseat no longer silently skips ibp-flap BMNs whose PhaseState
+  reason is `flcc`. The `phase_reason == "nlcc"` gate was borrowed
+  from XID-109 (where `cwctl flcc return-to-ready` legitimately
+  requires NLCC handoff) but IBP reseat just files a DCT ticket — no
+  state-machine precondition exists. Since `IBMultipleFlaps` is an
+  FLCC alert, most ibp-flap BMNs sit at `phase_reason="flcc"` and
+  were dropped without surfacing. The trigger is now just CWNC-STATE
+  = `triage` + an open HO ticket whose description mentions ibp.
+  `phase_reason` is still captured on the candidate for diagnostic
+  display in the skipped block.
+
+### Fixed
 - Quote the JIRA project key in every JQL string the tool emits. `DO`
   collides with a reserved JQL word (legacy boolean OR), so JIRA rejected
   unquoted `project = DO` with `HTTP 400 Bad Request: 'DO' is a reserved

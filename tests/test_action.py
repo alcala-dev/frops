@@ -75,6 +75,18 @@ def test_classify_cw0102_on_gh200_is_power_drain() -> None:
     assert "clear CW0102" in action.command
 
 
+def test_classify_cw0912_on_gh200_is_power_drain() -> None:
+    # CW0912 routes through the same POWER_DRAIN path as CW0211/CW0102 —
+    # the CW0912-specific node-zap rerun is scheduled post-execution by
+    # frops.cw0912, not classified differently here.
+    target = _target(reports=[_report([("CW0912", "gpu link timeout")])])
+    action = classify(target)
+    assert action.kind is ActionKind.POWER_DRAIN
+    assert action.triggering_codes == ("CW0912",)
+    assert action.command is not None
+    assert "clear CW0912" in action.command
+
+
 def test_classify_power_drain_picks_lexicographic_first_when_both_codes() -> None:
     target = _target(reports=[_report([("CW0211", "x"), ("CW0102", "y")])])
     action = classify(target)

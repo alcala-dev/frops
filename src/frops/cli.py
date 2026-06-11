@@ -38,6 +38,10 @@ from frops.catalog import (
     SKU_VIEW_TEMPLATE_JSON,
 )
 from frops.commands import capture_command, run_command
+from frops.cw0912 import (
+    render_node_zap_rerun_summary,
+    schedule_node_zap_reruns,
+)
 from frops.drive_inspect import (
     DriveInspectResolution,
     resolve_drive_inspect,
@@ -334,6 +338,16 @@ def _run_sku_action_plan(sku: str, user_filter: str | None, *, auto_yes: bool = 
         print()
         print(render_execution_summary(summary))
         plan_rc = summary.worst_rc
+
+        # CW0912 stage-1 follow-up: every successful power-drain whose
+        # triggering codes include CW0912 gets a node-zap rerun queued
+        # via at(1) at +15 minutes. Non-CW0912 power-drains are
+        # untouched. Renders a single info block per affected BMN.
+        reruns = schedule_node_zap_reruns(summary, targets_by_bmn)
+        rerun_summary = render_node_zap_rerun_summary(reruns)
+        if rerun_summary:
+            print()
+            print(rerun_summary)
 
     if run_access and access_pool:
         print()

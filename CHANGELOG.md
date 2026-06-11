@@ -8,6 +8,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **CW0912 progressive remediation (stage 1)** for GPU-GH200-01. CW0912
+  is now part of `POWER_DRAIN_CODES`, so it routes through the existing
+  `cwctl flcc node --one-off -w orphan -s power-drain` action. After
+  Phase B executes a successful CW0912-triggered power-drain, frops
+  schedules a node-zap rerun via `at(1)` at +15 minutes
+  (`cwctl flcc node -w <WORKFLOW> -s node-zap <BMN> -m "rerunning
+  node-zap after remote power-drain"`). The rerun is queued on the
+  host's own scheduler — frops stays one-shot. A post-execution table
+  surfaces per-BMN scheduling outcomes (job id on success; rendered
+  cwctl command on failure so the operator can run it manually).
+  Stages 2 (DCT tray-reseat after a persistent failure) and 3 (HO
+  ticket RMA escalation) are tracked separately and will land in
+  follow-up PRs.
+- New `frops.schedule` module: thin `at(1)` wrapper with graceful
+  degradation when `at` / `atd` is unavailable.
+- New `frops.cw0912` module: `node_zap_rerun_command`, post-execution
+  scheduling pass, and the rendered summary table.
+
+### Added
 - **XID-109 "ready for return-to-ready" table.** `view sku --action` now
   prints two parallel XID-109 summary tables above the planned-actions
   block: the existing "waiting for return-to-fleetops" list (BMNs whose

@@ -71,6 +71,7 @@ from frops.xid109 import (
     collect_xid109_candidates,
     fetch_phase_reason,
     parse_cwnc_states,
+    render_actionable_summary,
     render_waiting_summary,
     return_to_ready_command,
     split_by_actionable,
@@ -260,6 +261,10 @@ def _run_sku_action_plan(sku: str, user_filter: str | None, *, auto_yes: bool = 
     xid109_actionable, xid109_waiting = _maybe_run_xid109_pipeline(actions, targets, jira_client)
     if xid109_actionable:
         actions = _apply_xid109_overrides(actions, xid109_actionable)
+        # Print the actionable summary before the waiting one so the
+        # operator sees the "ready to run" pool first.
+        print()
+        print(render_actionable_summary(xid109_actionable))
     if xid109_waiting:
         print()
         print(render_waiting_summary(xid109_waiting))

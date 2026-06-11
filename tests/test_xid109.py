@@ -10,6 +10,7 @@ from frops.xid109 import (
     collect_xid109_candidates,
     description_mentions_xid_109,
     parse_cwnc_states,
+    render_actionable_summary,
     render_waiting_summary,
     return_to_ready_command,
     split_by_actionable,
@@ -276,3 +277,64 @@ def test_render_waiting_summary_renders_table_with_details() -> None:
         assert value in rendered
     # Empty phase reason falls back to "(unknown)".
     assert "(unknown)" in rendered
+
+
+# --------------------------- render_actionable_summary ----------------------
+
+
+def test_render_actionable_summary_empty_returns_empty_string() -> None:
+    assert render_actionable_summary([]) == ""
+
+
+def test_render_actionable_summary_renders_table_with_details() -> None:
+    actionable = [
+        XID109Candidate(
+            bmn="ss900770x4321000",
+            cw_node="g999aaa",
+            sku="GPU-H100-01",
+            cwnc_state="triage",
+            phase_reason=NLCC_OWNS_REASON,
+            jira_issue="HO-22222",
+            actionable=True,
+        ),
+        XID109Candidate(
+            bmn="ss900770x4321001",
+            cw_node="g999bbb",
+            sku="GPU-H100-01",
+            cwnc_state="triage",
+            phase_reason=NLCC_OWNS_REASON,
+            jira_issue="HO-22223",
+            actionable=True,
+        ),
+    ]
+    rendered = render_actionable_summary(actionable)
+    # Count + section header.
+    assert "=== XID 109 BMNs ready for return-to-ready (2) ===" in rendered
+    # Intro mentions both flcc-triage and nlcc-triage so the operator knows
+    # exactly why these BMNs are eligible.
+    assert "flcc-triage" in rendered and "nlcc-triage" in rendered
+    # Same column layout as the waiting table.
+    for token in ("BMN", "CW-NODE", "CWNC-STATE", "PHASE-REASON", "HO TICKET"):
+        assert token in rendered
+    for value in ("ss900770x4321000", "g999aaa", "HO-22222", NLCC_OWNS_REASON):
+        assert value in rendered
+
+
+def test_render_actionable_and_waiting_summaries_are_visually_distinct() -> None:
+    # The two tables share a column layout but their titles + intros must
+    # differ so the operator can tell at a glance which group they're in.
+    candidate = XID109Candidate(
+        bmn="ss900770x4000001",
+        cw_node="g1",
+        sku="GPU-H100-01",
+        cwnc_state="triage",
+        phase_reason=NLCC_OWNS_REASON,
+        jira_issue="HO-1",
+        actionable=True,
+    )
+    actionable = render_actionable_summary([candidate])
+    waiting = render_waiting_summary([candidate])
+    assert "ready for return-to-ready" in actionable
+    assert "ready for return-to-ready" not in waiting
+    assert "waiting for return-to-fleetops" in waiting
+    assert "waiting for return-to-fleetops" not in actionable

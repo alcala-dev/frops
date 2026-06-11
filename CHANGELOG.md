@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **XID-109 "ready for return-to-ready" table.** `view sku --action` now
+  prints two parallel XID-109 summary tables above the planned-actions
+  block: the existing "waiting for return-to-fleetops" list (BMNs whose
+  flcc/nlcc handoff has not completed) and a new "ready for
+  return-to-ready" list (BMNs at PhaseState reason `nlcc`, eligible for
+  `cwctl flcc node -w return-to-ready`). The actionable summary prints
+  first so the operator sees the actionable pool before scrolling.
+  Column layout matches the waiting table (BMN / CW-NODE / CWNC-STATE /
+  PHASE-REASON / HO TICKET) with the same yellow-BMN + cyan-HO-TICKET
+  highlights. SKU-agnostic — applies to any GPU SKU with XID 109 codes,
+  not just H100-01.
+
 ### Fixed
 - IBP reseat no longer silently skips ibp-flap BMNs whose PhaseState
   reason is `flcc`. The `phase_reason == "nlcc"` gate was borrowed

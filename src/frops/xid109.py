@@ -214,38 +214,75 @@ def split_by_actionable(
     return list_a, list_b
 
 
-def render_waiting_summary(waiting: list[XID109Candidate]) -> str:
-    """Render the "BMNs waiting for return-to-fleetops" section.
+def _render_xid109_table(
+    title: str,
+    intro: list[str],
+    candidates: list[XID109Candidate],
+) -> str:
+    """Internal table renderer shared by the actionable / waiting summaries.
 
-    Surfaces JIRA ticket + flcc/nlcc state so the operator can sanity-check
-    the classification. Skipped (returns "") when nothing's waiting.
+    Returns "" when there are no candidates so callers can guard with a
+    simple `if not summary` check.
     """
-    if not waiting:
+    if not candidates:
         return ""
 
-    lines: list[str] = [
-        f"=== XID 109 BMNs waiting for return-to-fleetops ({len(waiting)}) ===",
-        "",
-        "These BMNs match an open HO ticket mentioning XID 109 but have not",
-        "yet reached both flcc-triage and nlcc-triage. They are not actionable",
-        "via return-to-ready until propagation completes.",
-        "",
-    ]
+    lines: list[str] = [title, ""]
+    lines.extend(intro)
+    lines.append("")
 
     cols: list[tuple[str, list[str]]] = [
-        ("BMN", [c.bmn for c in waiting]),
-        ("CW-NODE", [c.cw_node or "(none)" for c in waiting]),
-        ("CWNC-STATE", [c.cwnc_state for c in waiting]),
-        ("PHASE-REASON", [c.phase_reason or "(unknown)" for c in waiting]),
-        ("HO TICKET", [c.jira_issue for c in waiting]),
+        ("BMN", [c.bmn for c in candidates]),
+        ("CW-NODE", [c.cw_node or "(none)" for c in candidates]),
+        ("CWNC-STATE", [c.cwnc_state for c in candidates]),
+        ("PHASE-REASON", [c.phase_reason or "(unknown)" for c in candidates]),
+        ("HO TICKET", [c.jira_issue for c in candidates]),
     ]
     widths = [max(len(h), max(len(v) for v in vs)) for h, vs in cols]
     lines.append("  ".join(h.ljust(w) for (h, _), w in zip(cols, widths, strict=True)))
     lines.append("  ".join("-" * w for w in widths))
-    for i in range(len(waiting)):
+    for i in range(len(candidates)):
         row = [vs[i] for _, vs in cols]
         cells = [v.ljust(w) for v, w in zip(row, widths, strict=True)]
         cells[0] = yellow(cells[0])  # BMN
         cells[-1] = cyan(cells[-1])  # HO TICKET
         lines.append("  ".join(cells))
     return "\n".join(lines)
+
+
+def render_actionable_summary(actionable: list[XID109Candidate]) -> str:
+    """Render the "BMNs ready for return-to-ready" section.
+
+    These BMNs have reached both flcc-triage and nlcc-triage (PhaseState
+    reason `nlcc`) and are eligible for `cwctl flcc node -w return-to-ready`.
+    The action plan below already carries the rendered cwctl commands;
+    this table is a quick at-a-glance count + ticket reference so the
+    operator can size up the actionable pool before scrolling through
+    the plan. Skipped (returns "") when nothing's actionable.
+    """
+    return _render_xid109_table(
+        title=f"=== XID 109 BMNs ready for return-to-ready ({len(actionable)}) ===",
+        intro=[
+            "These BMNs match an open HO ticket mentioning XID 109 and have",
+            "reached both flcc-triage and nlcc-triage. They are eligible for",
+            "`cwctl flcc node -w return-to-ready ...` — see the plan below.",
+        ],
+        candidates=actionable,
+    )
+
+
+def render_waiting_summary(waiting: list[XID109Candidate]) -> str:
+    """Render the "BMNs waiting for return-to-fleetops" section.
+
+    Surfaces JIRA ticket + flcc/nlcc state so the operator can sanity-check
+    the classification. Skipped (returns "") when nothing's waiting.
+    """
+    return _render_xid109_table(
+        title=f"=== XID 109 BMNs waiting for return-to-fleetops ({len(waiting)}) ===",
+        intro=[
+            "These BMNs match an open HO ticket mentioning XID 109 but have not",
+            "yet reached both flcc-triage and nlcc-triage. They are not actionable",
+            "via return-to-ready until propagation completes.",
+        ],
+        candidates=waiting,
+    )

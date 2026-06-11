@@ -1264,10 +1264,14 @@ def test_main_view_sku_action_xid109_pipeline_runs_via_x_selection(
     out = capsys.readouterr().out
     assert rc == 0
 
-    # 1. Waiting section rendered above the plan with the right BMN.
+    # 1a. Actionable section rendered above the plan with the eligible BMN.
+    assert "=== XID 109 BMNs ready for return-to-ready (1) ===" in out
+    # 1b. Waiting section rendered above the plan with the still-propagating BMN.
     assert "=== XID 109 BMNs waiting for return-to-fleetops (1) ===" in out
     assert "bmn-waiting" in out
     assert "HO-12345" in out
+    # 1c. The actionable summary appears BEFORE the waiting summary.
+    assert out.index("ready for return-to-ready") < out.index("waiting for return-to-fleetops")
 
     # 2. The actionable BMN appears in the plan under [xid-109-return-to-ready].
     assert "[xid-109-return-to-ready] 1 node(s)" in out

@@ -128,7 +128,8 @@ def test_ibp_reseat_command_falls_back_to_generic_label() -> None:
 def test_build_do_search_jql_filters_to_DO_project_open_status_and_keywords() -> None:
     jql = build_do_search_jql(("ss900770x4200980", "g1cb982", "S900770X4200980"))
     assert jql is not None
-    assert f"project = {DO_PROJECT}" in jql
+    # Quoted because `DO` is a reserved JQL word.
+    assert f'project = "{DO_PROJECT}"' in jql
     # Status filter excludes closed tickets so a previously-closed reseat
     # doesn't suppress a new flap.
     assert "statusCategory" in jql and "Done" in jql

@@ -77,7 +77,9 @@ def build_search_jql(identifiers: tuple[str, ...]) -> str | None:
     keyword_clauses = " OR ".join(
         f'summary ~ "{kw}" OR description ~ "{kw}"' for kw in DRIVE_KEYWORDS
     )
-    return f"project = {DO_PROJECT} AND ({id_clauses}) AND ({keyword_clauses})"
+    # `DO` is a reserved JQL word (boolean OR equivalent in legacy grammar),
+    # so the project key must be quoted or JIRA returns HTTP 400.
+    return f'project = "{DO_PROJECT}" AND ({id_clauses}) AND ({keyword_clauses})'
 
 
 def _escape(value: str) -> str:

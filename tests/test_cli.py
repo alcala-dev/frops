@@ -1049,7 +1049,7 @@ def test_main_view_sku_action_ibp_reseat_files_dct_when_no_open_do_ticket(
         def search(self, jql: str) -> list[object]:
             from frops.jira import JIRAIssue
 
-            if f"project = {'DO'}" in jql:
+            if 'project = "DO"' in jql:
                 # DO project query — only the second BMN has an open match.
                 if "bmn-ibp-old" in jql or "SN-IBP-EXISTING" in jql or "g2dde99" in jql:
                     return [JIRAIssue(key="DO-101", summary="...", status="In Progress")]

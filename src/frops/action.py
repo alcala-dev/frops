@@ -51,7 +51,7 @@ class ActionKind(str, Enum):
     NOOP = "noop"
 
 
-POWER_DRAIN_CODES: frozenset[str] = frozenset({"CW0211", "CW0102"})
+POWER_DRAIN_CODES: frozenset[str] = frozenset({"CW0211", "CW0102", "CW0912"})
 POWER_DRAIN_ELIGIBLE_SKUS: frozenset[str] = frozenset({"GPU-GH200-01"})
 HO_TICKET_CODES: frozenset[str] = frozenset({"CW0201"})
 # CW0810: AWX reports "No drives were detected" — node needs onsite

@@ -26,7 +26,7 @@ from frops.jira import (
 
 def test_jql_single_identifier_emits_summary_and_status_clauses() -> None:
     jql = build_search_jql("HO", ["ss900770x4200980"])
-    assert "project = HO" in jql
+    assert 'project = "HO"' in jql
     assert 'summary ~ "ss900770x4200980"' in jql
     assert 'status = "Awaiting Support"' in jql
 
@@ -67,7 +67,7 @@ def test_jql_custom_statuses() -> None:
 def test_jql_no_status_filter_when_statuses_empty() -> None:
     jql = build_search_jql("HO", ["x"], statuses=())
     assert "status" not in jql
-    assert "project = HO" in jql
+    assert 'project = "HO"' in jql
 
 
 def test_default_constants_have_expected_values() -> None:
@@ -195,7 +195,7 @@ def test_search_parses_issues_and_sends_basic_auth(
         )
 
     with patch("frops.jira.urllib.request.urlopen", _fake_urlopen):
-        issues = client.search('project = HO AND summary ~ "ss900770x4200980"')
+        issues = client.search('project = "HO" AND summary ~ "ss900770x4200980"')
 
     assert issues == [
         JIRAIssue(
@@ -207,7 +207,7 @@ def test_search_parses_issues_and_sends_basic_auth(
     assert sent["method"] == "POST"
     assert sent["url"].endswith("/rest/api/3/search/jql")
     assert sent["auth"].startswith("Basic ")
-    assert sent["body"]["jql"].startswith("project = HO")
+    assert sent["body"]["jql"].startswith('project = "HO"')
     assert sent["body"]["maxResults"] == 50
 
 

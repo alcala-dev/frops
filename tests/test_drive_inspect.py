@@ -50,7 +50,8 @@ def _drive_inspect_action(
 def test_build_search_jql_uses_DO_project_and_drive_keywords() -> None:
     jql = build_search_jql(("ss900770x4200980", "g81b512", "S900770X4200980"))
     assert jql is not None
-    assert f"project = {DO_PROJECT}" in jql
+    # Quoted because `DO` is a reserved JQL word.
+    assert f'project = "{DO_PROJECT}"' in jql
     # All three identifiers contribute to the OR'd id clause.
     for ident in ("ss900770x4200980", "g81b512", "S900770X4200980"):
         assert ident in jql

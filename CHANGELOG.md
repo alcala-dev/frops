@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Quote the JIRA project key in every JQL string the tool emits. `DO`
+  collides with a reserved JQL word (legacy boolean OR), so JIRA rejected
+  unquoted `project = DO` with `HTTP 400 Bad Request: 'DO' is a reserved
+  JQL word`. The DRIVE_INSPECT and IBP_RESEAT dedup queries — and the
+  generic HO search builder — now emit `project = "..."` for any project
+  key, which is safe for both reserved and non-reserved keys.
+
 ### Added
 - **IBP reseat DCT ticket workflow** for `view sku --action`. Mirrors the
   XID-109 state-machine trigger (CWNC-STATE = `triage` + PhaseState

@@ -65,7 +65,10 @@ def build_search_jql(
     id_clauses = " OR ".join(f'summary ~ "{_escape_jql_text(i)}"' for i in cleaned_ids)
     status_clauses = " OR ".join(f'status = "{_escape_jql_text(s)}"' for s in statuses if s)
 
-    parts = [f"project = {project}"]
+    # Always quote the project key — some valid JIRA project keys (e.g. `DO`,
+    # `OR`, `AND`, `IN`, `NOT`) collide with reserved JQL words and JIRA
+    # rejects the unquoted form with HTTP 400. Quoting is safe for all keys.
+    parts = [f'project = "{_escape_jql_text(project)}"']
     if status_clauses:
         parts.append(f"({status_clauses})")
     parts.append(f"({id_clauses})")

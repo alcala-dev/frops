@@ -54,7 +54,6 @@ HO_IBP_PATTERN: re.Pattern[str] = re.compile(r"(?i)\bibp\d*\b|\bIBMultipleFlaps\
 HO_IBP_NUMBER_PATTERN: re.Pattern[str] = re.compile(r"(?i)\bibp(\d+)\b")
 
 TRIAGE_STATE: str = "triage"  # bmns -o wide CWNC-STATE
-NLCC_OWNS_REASON: str = "nlcc"  # kubectl PhaseState.reason — same heuristic as xid109
 
 GENERIC_IBP_LABEL: str = "ibp"
 
@@ -171,19 +170,22 @@ def collect_ibp_reseat_candidates(
     fetch_phase: FetchPhaseFn,
     do_search: DOSearchFn,
 ) -> list[IBPReseatCandidate]:
-    """Four-stage pipeline, cheapest filter first.
+    """Three-stage trigger pipeline, cheapest filter first.
 
     For each BMN:
       1. CWNC-STATE must be `triage` (cheap dict lookup).
       2. JIRA HO project must return a match (one network call).
       3. The matched HO ticket's description must mention ibp (one
          network call to fetch the description).
-      4. PhaseState reason must be `nlcc` (one kubectl call).
 
-    Only BMNs that survive all four stages run the DO ticket dedup
-    (one more network call). Phase reason is queried last so the
-    expensive kubectl call only runs for BMNs already known to be
-    ibp-relevant.
+    Surviving candidates run the DO ticket dedup (one more network call).
+
+    Note on PhaseState reason: `fetch_phase` is still called so the
+    candidate record surfaces it for diagnostics, but the value does
+    NOT gate eligibility. The IBMultipleFlaps alert is raised by FLCC,
+    so most ibp-flap BMNs sit at `phase_reason == "flcc"` and never
+    propagate to nlcc — unlike XID-109's `cwctl flcc return-to-ready`
+    workflow, the DCT ticket here has no state-machine precondition.
     """
     candidates: list[IBPReseatCandidate] = []
     for target in targets:
@@ -196,12 +198,8 @@ def collect_ibp_reseat_candidates(
         description = fetch_description(ho_key)
         if not description_mentions_ibp(description):
             continue
+        # Captured for diagnostic surfacing in the skipped block; not a gate.
         phase_reason = fetch_phase(target.bmn)
-        if phase_reason != NLCC_OWNS_REASON:
-            # Still in flcc-only triage; not yet ready for an ibp reseat
-            # ticket. Skip silently — when the operator re-runs after the
-            # phase progresses, the BMN will surface.
-            continue
         ibp_label = find_ibp_label_in_description(description)
         existing, error = do_search(identifiers)
         candidates.append(

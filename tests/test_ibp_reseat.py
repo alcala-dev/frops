@@ -7,7 +7,6 @@ from frops.ibp_reseat import (
     DO_PROJECT,
     GENERIC_IBP_LABEL,
     IBP_TICKET_KEYWORDS,
-    NLCC_OWNS_REASON,
     IBPReseatCandidate,
     apply_ibp_reseat_overrides,
     build_do_search_jql,
@@ -161,26 +160,29 @@ def test_build_do_search_jql_escapes_double_quotes() -> None:
 # --------------------------- collect_ibp_reseat_candidates -------------------
 
 
-def test_collect_filters_triage_then_ho_then_description_then_phase() -> None:
+def test_collect_filters_triage_then_ho_then_description() -> None:
+    # PhaseState reason is captured for diagnostic surfacing but does NOT
+    # gate eligibility — IBMultipleFlaps is an FLCC alert so most ibp-flap
+    # BMNs sit at `phase_reason="flcc"` and would never reach nlcc handoff.
     targets = [
-        _target(bmn="ready"),  # everything passes → actionable
+        _target(bmn="nlcc-node"),  # passes; phase reason happens to be nlcc
+        _target(bmn="flcc-node"),  # passes; phase reason still flcc (the bug fix)
         _target(bmn="no-triage"),  # CWNC-STATE filter drops
         _target(bmn="no-ho"),  # HO search returns None
         _target(bmn="no-ibp"),  # HO matches but description has no ibp
-        _target(bmn="not-nlcc"),  # phase reason still flcc
     ]
     cwnc_states = {
-        "ready": "triage",
+        "nlcc-node": "triage",
+        "flcc-node": "triage",
         "no-triage": "production",
         "no-ho": "triage",
         "no-ibp": "triage",
-        "not-nlcc": "triage",
     }
     descriptions_by_bmn = {
-        "ready": "g1 ibp2 has flapped",
+        "nlcc-node": "g1 ibp2 has flapped",
+        "flcc-node": "ibp0 link down",
         "no-ho": "(never fetched — no ticket)",
         "no-ibp": "Xid 109 detected on the node",
-        "not-nlcc": "ibp0 link down",
     }
     ho_calls: list[tuple[str, ...]] = []
 
@@ -188,26 +190,23 @@ def test_collect_filters_triage_then_ho_then_description_then_phase() -> None:
         ho_calls.append(ids)
         if "no-ho" in ids:
             return None
-        if "ready" in ids:
+        if "nlcc-node" in ids:
             return "HO-1"
         if "no-ibp" in ids:
             return "HO-2"
-        if "not-nlcc" in ids:
+        if "flcc-node" in ids:
             return "HO-3"
         return None
 
     def _fetch_desc(key: str) -> str:
         return {
-            "HO-1": descriptions_by_bmn["ready"],
+            "HO-1": descriptions_by_bmn["nlcc-node"],
             "HO-2": descriptions_by_bmn["no-ibp"],
-            "HO-3": descriptions_by_bmn["not-nlcc"],
+            "HO-3": descriptions_by_bmn["flcc-node"],
         }.get(key, "")
 
-    phase_calls: list[str] = []
-
     def _fetch_phase(bmn: str) -> str:
-        phase_calls.append(bmn)
-        return NLCC_OWNS_REASON if bmn == "ready" else "flcc"
+        return "nlcc" if bmn == "nlcc-node" else "flcc"
 
     candidates = collect_ibp_reseat_candidates(
         targets,
@@ -218,12 +217,16 @@ def test_collect_filters_triage_then_ho_then_description_then_phase() -> None:
         do_search=lambda _ids: (None, None),
     )
 
-    assert [c.bmn for c in candidates] == ["ready"]
-    assert candidates[0].actionable is True
-    assert candidates[0].ibp_label == "ibp2"
-    assert candidates[0].ho_ticket == "HO-1"
-    # not-nlcc reached phase fetch but didn't survive the nlcc check.
-    assert "not-nlcc" in phase_calls
+    # Both nlcc-node and flcc-node make it through; phase_reason no longer gates.
+    assert {c.bmn for c in candidates} == {"nlcc-node", "flcc-node"}
+    by_bmn = {c.bmn: c for c in candidates}
+    assert by_bmn["nlcc-node"].actionable is True
+    assert by_bmn["nlcc-node"].ibp_label == "ibp2"
+    assert by_bmn["nlcc-node"].ho_ticket == "HO-1"
+    assert by_bmn["nlcc-node"].phase_reason == "nlcc"
+    assert by_bmn["flcc-node"].actionable is True
+    assert by_bmn["flcc-node"].ibp_label == "ibp0"
+    assert by_bmn["flcc-node"].phase_reason == "flcc"
     # no-triage was filtered upfront, so HO search never ran for it.
     assert all("no-triage" not in ids for ids in ho_calls)
 
@@ -235,7 +238,7 @@ def test_collect_records_existing_do_ticket_skipping_creation() -> None:
         {target.bmn: "triage"},
         ho_search=lambda _ids: "HO-9",
         fetch_description=lambda _k: "ibp1 down",
-        fetch_phase=lambda _b: NLCC_OWNS_REASON,
+        fetch_phase=lambda _b: "nlcc",
         do_search=lambda _ids: ("DO-42", None),
     )
     (cand,) = candidates
@@ -251,7 +254,7 @@ def test_collect_records_do_search_error_skipping_creation() -> None:
         {target.bmn: "triage"},
         ho_search=lambda _ids: "HO-9",
         fetch_description=lambda _k: "ibp2 down",
-        fetch_phase=lambda _b: NLCC_OWNS_REASON,
+        fetch_phase=lambda _b: "nlcc",
         do_search=lambda _ids: (None, "HTTP 500"),
     )
     (cand,) = candidates
@@ -271,7 +274,7 @@ def test_apply_overrides_promotes_ho_action_to_ibp_reseat() -> None:
         sku=target.sku,
         serial=target.serial,
         region=target.region,
-        phase_reason=NLCC_OWNS_REASON,
+        phase_reason="nlcc",
         ho_ticket="HO-1",
         ibp_label="ibp2",
         existing_do_ticket=None,
@@ -295,7 +298,7 @@ def test_apply_overrides_downgrades_to_noop_when_existing_do_ticket() -> None:
         sku="GPU-H100-02",
         serial="S",
         region="RNO2A",
-        phase_reason=NLCC_OWNS_REASON,
+        phase_reason="nlcc",
         ho_ticket="HO-2",
         ibp_label="ibp",
         existing_do_ticket="DO-99",
@@ -328,7 +331,7 @@ def test_apply_overrides_leaves_higher_precedence_actions_alone() -> None:
         sku="GPU-H100-02",
         serial="S",
         region="RNO2A",
-        phase_reason=NLCC_OWNS_REASON,
+        phase_reason="nlcc",
         ho_ticket="HO-1",
         ibp_label="ibp1",
         existing_do_ticket=None,
@@ -348,7 +351,7 @@ def test_render_ibp_skipped_summary_empty_when_all_actionable() -> None:
         sku="GPU-H100-02",
         serial="S",
         region="RNO2A",
-        phase_reason=NLCC_OWNS_REASON,
+        phase_reason="nlcc",
         ho_ticket="HO-1",
         ibp_label="ibp1",
         existing_do_ticket=None,
@@ -365,7 +368,7 @@ def test_render_ibp_skipped_summary_lists_existing_and_error_cases() -> None:
             sku="GPU-H100-02",
             serial="S1",
             region="RNO2A",
-            phase_reason=NLCC_OWNS_REASON,
+            phase_reason="nlcc",
             ho_ticket="HO-A",
             ibp_label="ibp1",
             existing_do_ticket="DO-77",
@@ -377,7 +380,7 @@ def test_render_ibp_skipped_summary_lists_existing_and_error_cases() -> None:
             sku="GPU-H100-02",
             serial="S2",
             region="RNO2A",
-            phase_reason=NLCC_OWNS_REASON,
+            phase_reason="nlcc",
             ho_ticket="HO-B",
             ibp_label="ibp",
             existing_do_ticket=None,

@@ -42,6 +42,23 @@ from frops.cw0912 import (
     render_node_zap_rerun_summary,
     schedule_node_zap_reruns,
 )
+from frops.cw0912_remediation import (
+    CW0912Candidate,
+    apply_cw0912_overrides,
+    clear_recovered_cw0912_states,
+    collect_cw0912_candidates,
+    persist_cw0912_state_after_execute,
+    render_cw0912_skipped_summary,
+)
+from frops.cw0912_state import (
+    clear_state as clear_cw0912_state,
+)
+from frops.cw0912_state import (
+    read_state as read_cw0912_state,
+)
+from frops.cw0912_state import (
+    write_state as write_cw0912_state,
+)
 from frops.drive_inspect import (
     DriveInspectResolution,
     resolve_drive_inspect,
@@ -300,6 +317,32 @@ def _run_sku_action_plan(sku: str, user_filter: str | None, *, auto_yes: bool = 
             print()
             print(skipped)
 
+    # CW0912 state-machine override (stage 2): if a GH200 already saw a
+    # CW0912 power-drain (per-BMN state file at ~/.cache/frops/cw0912/)
+    # and the current AWX job_id differs from the persisted one, the
+    # node failed again → file a DCT tray reseat instead. Same-job
+    # re-runs downgrade to NOOP with a "wait for the at-job" note.
+    # Recovered BMNs (no CW0912 in current AWX) get their state cleared
+    # here so a future flap restarts at stage 1.
+    cw0912_candidates = _maybe_collect_cw0912_candidates(targets, jira_client)
+    if cw0912_candidates:
+        actions = apply_cw0912_overrides(actions, cw0912_candidates)
+        cw0912_skipped = render_cw0912_skipped_summary(cw0912_candidates)
+        if cw0912_skipped:
+            print()
+            print(cw0912_skipped)
+    recovered = clear_recovered_cw0912_states(
+        targets,
+        state_reader=read_cw0912_state,
+        state_clearer=clear_cw0912_state,
+    )
+    if recovered:
+        print()
+        print(
+            f"info: cleared CW0912 state for {len(recovered)} recovered BMN(s): "
+            f"{', '.join(recovered)}"
+        )
+
     print()
     print(render_plan(actions))
 
@@ -348,6 +391,19 @@ def _run_sku_action_plan(sku: str, user_filter: str | None, *, auto_yes: bool = 
         if rerun_summary:
             print()
             print(rerun_summary)
+
+        # Persist CW0912 state for every successful CW0912 action so the
+        # next --action invocation can detect "same job_id → in-progress"
+        # or "new job_id → escalate". POWER_DRAIN with CW0912 in codes
+        # → stage POWER_DRAIN_SCHEDULED; CW0912_TRAY_RESEAT → stage
+        # TRAY_RESEAT_FILED.
+        if cw0912_candidates:
+            persist_cw0912_state_after_execute(
+                [(r.action, r.rc) for r in summary.results],
+                cw0912_candidates,
+                state_writer=write_cw0912_state,
+                now=_utc_now_iso,
+            )
 
     if run_access and access_pool:
         print()
@@ -430,6 +486,51 @@ def _render_drive_inspect_resolutions(resolutions: list[DriveInspectResolution])
         else:
             lines.append(f"  - {r.bmn}  →  (skipped: {r.error})")
     return "\n".join(lines)
+
+
+def _utc_now_iso() -> str:
+    """ISO-8601 UTC timestamp with seconds precision, suffixed `Z`.
+
+    Used as the `observed_at` field on CW0912 state files. Kept here
+    (not in cw0912_state) so the state module stays pure-functional
+    and the test fixtures supply their own clock.
+    """
+    return datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _maybe_collect_cw0912_candidates(
+    targets: list[BMNTarget],
+    jira_client: JIRAClient | None,
+) -> list[CW0912Candidate]:
+    """Build per-BMN CW0912 stage decisions, including DO dedup for stage 2.
+
+    Skipped (returns []) when JIRA is unavailable AND any candidate
+    would need DO dedup — without that lookup we'd risk filing a
+    duplicate tray-reseat ticket, which is worse than waiting one cycle.
+    When JIRA is unavailable but no stage-2 candidates exist, we still
+    return the in-progress / third-occurrence diagnoses so the operator
+    sees them.
+    """
+
+    def _do_search(identifiers: tuple[str, ...]) -> tuple[str | None, str | None]:
+        if jira_client is None:
+            return None, "JIRA credentials missing"
+        from frops.cw0912_remediation import build_tray_reseat_search_jql
+
+        jql = build_tray_reseat_search_jql(identifiers)
+        if jql is None:
+            return None, None
+        try:
+            issues = jira_client.search(jql)
+        except JIRAError as exc:
+            return None, str(exc)
+        return (issues[0].key if issues else None, None)
+
+    return collect_cw0912_candidates(
+        targets,
+        state_reader=read_cw0912_state,
+        do_search=_do_search,
+    )
 
 
 def _maybe_run_ibp_reseat_pipeline(
@@ -743,6 +844,15 @@ def _prompt_group_selection(
                 ActionKind.IBP_RESEAT,
                 "[i]bp-reseat",
                 counts_by_kind[ActionKind.IBP_RESEAT],
+            )
+        )
+    if ActionKind.CW0912_TRAY_RESEAT in counts_by_kind:
+        options.append(
+            (
+                "t",
+                ActionKind.CW0912_TRAY_RESEAT,
+                "[t]ray-reseat",
+                counts_by_kind[ActionKind.CW0912_TRAY_RESEAT],
             )
         )
     if access_targets:

@@ -8,6 +8,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **CW0912 progressive remediation (stage 2)** — DCT tray-reseat
+  escalation when CW0912 returns in a *different* AWX job after a
+  prior stage-1 power-drain. Per-BMN state file at
+  `~/.cache/frops/cw0912/<bmn>.json` (override via `FROPS_STATE_DIR`)
+  carries the prior AWX job_id + observed_at + stage. On the next
+  `--action` invocation:
+    - **same job_id** → IN_PROGRESS: POWER_DRAIN is downgraded to
+      NOOP with a "wait for the scheduled node-zap rerun" note (no
+      duplicate cwctl power-drain).
+    - **new job_id + prior stage=power_drain_scheduled** →
+      SECOND_OCCURRENCE: POWER_DRAIN is overridden to
+      `ActionKind.CW0912_TRAY_RESEAT`
+      (`cwctl ticket dct-action device $BMN -m "Please reseat the
+      GPU tray on node ($CWNODE | SN: $SERIALNUMBER)" -r $ZONE`).
+      Dedups against open / closed DO tickets matching `gpu tray` /
+      `tray reseat` / `reseat the gpu`.
+    - **new job_id + prior stage=tray_reseat_filed** →
+      THIRD_OCCURRENCE: NOOP with an RMA escalation note (phase 3
+      lands later).
+  Recovery cleanup: when a previously-tracked GH200 no longer carries
+  CW0912 in its current AWX job, the per-BMN state file is dropped so
+  a future flap restarts at stage 1.
+- New `[t]ray-reseat` letter shortcut in the action group prompt.
+- New modules `frops.cw0912_state` (atomic per-BMN JSON IO) and
+  `frops.cw0912_remediation` (stage decision + override + state
+  persistence). Pure-functional with capture-injected IO so tests
+  drive the full state machine without disk or network.
+
+### Added
 - **CW0912 progressive remediation (stage 1)** for GPU-GH200-01. CW0912
   is now part of `POWER_DRAIN_CODES`, so it routes through the existing
   `cwctl flcc node --one-off -w orphan -s power-drain` action. After

@@ -5,9 +5,15 @@ accidentally shell out to kubectl when a `main(["view", ...])` call
 runs. Individual tests that want to verify the runner is invoked
 re-bind via `monkeypatch.setattr`, which takes precedence over the
 autouse fixture.
+
+`FROPS_STATE_DIR` is also redirected to a per-test tmp dir so CW0912
+state file reads don't leak between tests (or pick up stale state
+from a developer's `~/.cache/frops/cw0912/` directory).
 """
 
 from __future__ import annotations
+
+from pathlib import Path
 
 import pytest
 
@@ -23,3 +29,17 @@ def _stub_shell_runners(monkeypatch: pytest.MonkeyPatch) -> None:
     this to their own fake, which silently overrides this default.
     """
     monkeypatch.setattr("frops.cli.run_command", lambda _cmd: 0)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_cw0912_state_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Redirect CW0912 state file IO at a per-test temp directory.
+
+    The CW0912 state machine reads `~/.cache/frops/cw0912/<bmn>.json`
+    by default; a developer running tests locally could otherwise see
+    state from their last fleet run leak into the test fixtures.
+    Tests that want to set up specific state files re-bind via
+    `monkeypatch.setenv("FROPS_STATE_DIR", str(some_path))`, which
+    takes precedence over this default.
+    """
+    monkeypatch.setenv("FROPS_STATE_DIR", str(tmp_path / "frops-cw0912"))

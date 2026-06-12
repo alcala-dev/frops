@@ -49,6 +49,8 @@ from frops.cw0912_remediation import (
     collect_cw0912_candidates,
     persist_cw0912_state_after_execute,
     render_cw0912_skipped_summary,
+    render_rma_template,
+    resolve_cw0912_rma_tickets,
 )
 from frops.cw0912_state import (
     clear_state as clear_cw0912_state,
@@ -327,6 +329,14 @@ def _run_sku_action_plan(sku: str, user_filter: str | None, *, auto_yes: bool = 
     cw0912_candidates = _maybe_collect_cw0912_candidates(targets, jira_client)
     if cw0912_candidates:
         actions = apply_cw0912_overrides(actions, cw0912_candidates)
+        # For CW0912_RMA_ESCALATE actions, look up the matching open HO
+        # ticket. When found, the resolver swaps the cwctl `return-to-
+        # triage` fallback for `jira_issue=<HO-key>` so the JIRA runner
+        # adds the RMA-template comment. When not found, the cwctl
+        # fallback runs and the operator re-runs --action on the next
+        # pass for the comment to land.
+        if any(a.kind is ActionKind.CW0912_RMA_ESCALATE for a in actions):
+            actions = _resolve_cw0912_rma_with_jira(actions, jira_client, targets_by_bmn)
         cw0912_skipped = render_cw0912_skipped_summary(cw0912_candidates)
         if cw0912_skipped:
             print()
@@ -376,7 +386,9 @@ def _run_sku_action_plan(sku: str, user_filter: str | None, *, auto_yes: bool = 
         summary = execute_plan(
             to_execute,
             run_command,
-            jira_runner=_build_jira_runner(jira_client) if jira_client is not None else None,
+            jira_runner=(
+                _build_jira_runner(jira_client, targets_by_bmn) if jira_client is not None else None
+            ),
         )
         print()
         print(render_execution_summary(summary))
@@ -763,11 +775,62 @@ def _resolve_with_jira(
     return resolve_ho_tickets(actions, _search, targets_by_bmn)
 
 
-def _build_jira_runner(client: JIRAClient) -> Callable[[PlannedAction], int]:
-    """Return a runner that appends a status block to action.jira_issue."""
+def _resolve_cw0912_rma_with_jira(
+    actions: list[PlannedAction],
+    client: JIRAClient | None,
+    targets_by_bmn: dict[str, BMNTarget],
+) -> list[PlannedAction]:
+    """Look up open HO tickets for CW0912_RMA_ESCALATE actions.
+
+    Mirrors `_resolve_with_jira` but for the RMA escalate kind. On JIRA
+    outage (missing client or JIRAError), every RMA action retains its
+    cwctl return-to-triage fallback so something useful still runs.
+    """
+    if client is None:
+        return actions  # cwctl fallback path stays in place
+
+    def _search(identifiers: tuple[str, ...]) -> str | None:
+        try:
+            jql = build_search_jql(JIRA_PROJECT, identifiers, JIRA_OPEN_STATUSES)
+            issues = client.search(jql)
+        except (JIRAError, ValueError) as exc:
+            print(
+                f"warning: JIRA HO lookup failed for RMA escalation {identifiers}: {exc}",
+                file=sys.stderr,
+            )
+            return None
+        return issues[0].key if issues else None
+
+    return resolve_cw0912_rma_tickets(actions, _search, targets_by_bmn)
+
+
+def _build_jira_runner(
+    client: JIRAClient,
+    targets_by_bmn: dict[str, BMNTarget],
+) -> Callable[[PlannedAction], int]:
+    """Return a runner that dispatches per action.kind to the right JIRA call.
+
+    HO_TICKET           → append a status block to Description (existing).
+    CW0912_RMA_ESCALATE → add the RMA-template comment, interpolating
+                          the BMN's serial from `targets_by_bmn`.
+    """
 
     def _run(action: PlannedAction) -> int:
         assert action.jira_issue is not None  # guarded by execute_plan dispatch
+        if action.kind is ActionKind.CW0912_RMA_ESCALATE:
+            target = targets_by_bmn.get(action.bmn)
+            serial = target.serial if target else ""
+            body = render_rma_template(action.cw_node, action.bmn, serial)
+            try:
+                client.add_comment(action.jira_issue, body)
+            except JIRAError as exc:
+                print(
+                    f"error: failed to add RMA comment on {action.jira_issue} for {action.bmn}: {exc}",
+                    file=sys.stderr,
+                )
+                return 1
+            print(f"added RMA comment on {action.jira_issue} for {action.bmn}")
+            return 0
         timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         block = render_jira_block(action, timestamp)
         try:
@@ -853,6 +916,15 @@ def _prompt_group_selection(
                 ActionKind.CW0912_TRAY_RESEAT,
                 "[t]ray-reseat",
                 counts_by_kind[ActionKind.CW0912_TRAY_RESEAT],
+            )
+        )
+    if ActionKind.CW0912_RMA_ESCALATE in counts_by_kind:
+        options.append(
+            (
+                "r",
+                ActionKind.CW0912_RMA_ESCALATE,
+                "[r]ma-escalate",
+                counts_by_kind[ActionKind.CW0912_RMA_ESCALATE],
             )
         )
     if access_targets:

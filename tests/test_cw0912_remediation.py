@@ -15,10 +15,14 @@ from frops.cw0912_remediation import (
     collect_cw0912_candidates,
     persist_cw0912_state_after_execute,
     render_cw0912_skipped_summary,
+    render_rma_template,
+    resolve_cw0912_rma_tickets,
+    rma_return_to_triage_command,
     tray_reseat_command,
 )
 from frops.cw0912_state import (
     STAGE_POWER_DRAIN_SCHEDULED,
+    STAGE_RMA_ESCALATED,
     STAGE_TRAY_RESEAT_FILED,
     CW0912State,
 )
@@ -211,7 +215,7 @@ def test_collect_third_occurrence_after_tray_reseat_filed() -> None:
         do_search=lambda _ids: (None, None),
     )
     assert cand.stage is CW0912Stage.THIRD_OCCURRENCE
-    assert cand.actionable is False  # phase 3 not implemented yet
+    assert cand.actionable is True  # phase 3 emits CW0912_RMA_ESCALATE
 
 
 def test_collect_corrupt_prior_stage_falls_back_to_first_occurrence() -> None:
@@ -296,11 +300,19 @@ def test_apply_downgrades_second_occurrence_with_dedup_hit_to_noop() -> None:
     assert "DO-99" in rewritten.notes
 
 
-def test_apply_downgrades_third_occurrence_to_noop_with_rma_note() -> None:
+def test_apply_third_occurrence_emits_rma_escalate_action() -> None:
+    # Phase 3: THIRD_OCCURRENCE now produces a CW0912_RMA_ESCALATE
+    # action with the cwctl return-to-triage fallback command. A
+    # separate JIRA resolver pass (in the CLI) overlays the HO ticket
+    # lookup — when found, command→None and jira_issue is populated.
     actions = [_power_drain_action()]
     cands = [_candidate(stage=CW0912Stage.THIRD_OCCURRENCE)]
     (rewritten,) = apply_cw0912_overrides(actions, cands)
-    assert rewritten.kind is ActionKind.NOOP
+    assert rewritten.kind is ActionKind.CW0912_RMA_ESCALATE
+    assert rewritten.command is not None
+    assert "return-to-triage" in rewritten.command
+    assert "Sending node to RMA" in rewritten.command
+    assert rewritten.jira_issue is None  # resolver pass hasn't run yet
     assert "RMA" in rewritten.notes
 
 
@@ -467,14 +479,19 @@ def test_render_summary_includes_stages_and_reasons() -> None:
         existing_do_ticket="DO-99",
         bmn="bmn-deduped",
     )
-    rma = _candidate(stage=CW0912Stage.THIRD_OCCURRENCE, bmn="bmn-rma")
-    rendered = render_cw0912_skipped_summary([in_progress, deduped, rma])
-    assert "CW0912 candidates not actioned this pass (3)" in rendered
+    rendered = render_cw0912_skipped_summary([in_progress, deduped])
+    assert "CW0912 candidates not actioned this pass (2)" in rendered
     assert "in_progress" in rendered
     assert "second_occurrence" in rendered
-    assert "third_occurrence" in rendered
     assert "DO-99" in rendered
-    assert "bmn-rma" in rendered
+
+
+def test_render_summary_omits_actionable_third_occurrence() -> None:
+    # THIRD_OCCURRENCE is actionable (phase 3 emits CW0912_RMA_ESCALATE),
+    # so it appears in the main plan — not in the skipped block.
+    rma = _candidate(stage=CW0912Stage.THIRD_OCCURRENCE)
+    rendered = render_cw0912_skipped_summary([rma])
+    assert rendered == ""
 
 
 def test_render_summary_omits_actionable_second_occurrence() -> None:
@@ -484,3 +501,200 @@ def test_render_summary_omits_actionable_second_occurrence() -> None:
     assert actionable.actionable is True
     rendered = render_cw0912_skipped_summary([actionable])
     assert rendered == ""
+
+
+# --------------------------- render_rma_template ----------------------------
+
+
+def test_render_rma_template_substitutes_identifier_sn_and_template_marker() -> None:
+    body = render_rma_template(cw_node="g75cb28", bmn="ss900770x4123", serial="S900770X4123")
+    assert body.startswith("RMA to Vendor")
+    # cw_node wins for Device Identifier when present.
+    assert "Device Identifier: g75cb28" in body
+    assert "Device SN: S900770X4123" in body
+    # Component fields are intentionally blank for the onsite tech.
+    assert "Component: GPU Tray" in body
+    assert "Component SN: \n" in body
+    assert "Component Slot: \n" in body
+    assert "Point of Failure:" in body
+    # Required logs carries the auto-fill marker so downstream sees it.
+    assert "Required logs:\n(this will be auto filled)" in body
+
+
+def test_render_rma_template_falls_back_to_bmn_when_cw_node_empty() -> None:
+    body = render_rma_template(cw_node="", bmn="ss900770x4999", serial="SN-X")
+    assert "Device Identifier: ss900770x4999" in body
+
+
+# --------------------------- rma_return_to_triage_command -------------------
+
+
+def test_rma_return_to_triage_command_matches_documented_form() -> None:
+    cmd = rma_return_to_triage_command("ss900770x4123")
+    assert "cwctl flcc node -w return-to-triage ss900770x4123" in cmd
+    # `-o` triggers HO ticket creation and the `-m` text mentions RMA so
+    # the resulting ticket has the right context for the operator.
+    assert " -o -m " in cmd
+    assert "Sending node to RMA" in cmd
+
+
+# --------------------------- resolve_cw0912_rma_tickets ---------------------
+
+
+def _rma_action(bmn: str = "ss900770x4123") -> PlannedAction:
+    return PlannedAction(
+        bmn=bmn,
+        cw_node="g75cb28",
+        sku=GH200_SKU,
+        kind=ActionKind.CW0912_RMA_ESCALATE,
+        triggering_codes=(CW0912,),
+        command=rma_return_to_triage_command(bmn),
+        notes="",
+    )
+
+
+def test_resolve_rma_swaps_to_jira_issue_when_search_finds_open_ho() -> None:
+    actions = [_rma_action()]
+    target = _target()
+    out = resolve_cw0912_rma_tickets(
+        actions,
+        search_fn=lambda _ids: "HO-42",
+        targets_by_bmn={target.bmn: target},
+    )
+    (action,) = out
+    assert action.kind is ActionKind.CW0912_RMA_ESCALATE
+    assert action.jira_issue == "HO-42"
+    assert action.command is None  # cwctl fallback replaced
+    assert "HO-42" in action.notes
+
+
+def test_resolve_rma_leaves_action_intact_when_no_ho_found() -> None:
+    actions = [_rma_action()]
+    target = _target()
+    out = resolve_cw0912_rma_tickets(
+        actions,
+        search_fn=lambda _ids: None,
+        targets_by_bmn={target.bmn: target},
+    )
+    (action,) = out
+    assert action.jira_issue is None
+    assert action.command is not None
+    assert "return-to-triage" in action.command
+
+
+def test_resolve_rma_skips_non_rma_actions() -> None:
+    other = PlannedAction(
+        bmn="ss900770x4123",
+        cw_node="g1",
+        sku=GH200_SKU,
+        kind=ActionKind.HO_TICKET,
+        triggering_codes=("CW0201",),
+        command="cwctl ...",
+        notes="",
+    )
+    out = resolve_cw0912_rma_tickets(
+        [other],
+        search_fn=lambda _ids: "HO-999",
+        targets_by_bmn={},
+    )
+    assert out == [other]  # HO_TICKET resolution lives in a separate path
+
+
+def test_resolve_rma_uses_full_search_identifiers_from_target() -> None:
+    target = BMNTarget(
+        bmn="ss900770x4123",
+        cw_node="g75cb28",
+        sku=GH200_SKU,
+        awx_reports=(),
+        serial="S900770X4123",
+    )
+    received: list[tuple[str, ...]] = []
+
+    def _search(ids: tuple[str, ...]) -> str | None:
+        received.append(ids)
+        return None
+
+    resolve_cw0912_rma_tickets(
+        [_rma_action()],
+        search_fn=_search,
+        targets_by_bmn={target.bmn: target},
+    )
+    assert received == [target.search_identifiers]
+    assert "ss900770x4123" in received[0]
+    assert "g75cb28" in received[0]
+    assert "S900770X4123" in received[0]
+
+
+# --------------------------- persist (RMA stage) ---------------------------
+
+
+def test_persist_writes_rma_escalated_only_when_jira_comment_landed() -> None:
+    action_with_jira = PlannedAction(
+        bmn="ss900770x4123",
+        cw_node="g75cb28",
+        sku=GH200_SKU,
+        kind=ActionKind.CW0912_RMA_ESCALATE,
+        triggering_codes=(CW0912,),
+        command=None,
+        notes="",
+        jira_issue="HO-42",
+    )
+    cand = _candidate(stage=CW0912Stage.THIRD_OCCURRENCE)
+    writes: list[CW0912State] = []
+    persist_cw0912_state_after_execute(
+        [(action_with_jira, 0)],
+        [cand],
+        state_writer=writes.append,
+        now=lambda: "2026-06-11T17:00:00Z",
+    )
+    assert len(writes) == 1
+    assert writes[0].stage == STAGE_RMA_ESCALATED
+    assert writes[0].job_id == cand.current_job_id
+
+
+def test_persist_skips_state_write_when_rma_action_used_cwctl_fallback() -> None:
+    # cwctl just created the HO ticket; the RMA comment hasn't landed
+    # yet (operator must re-run --action). We must NOT advance to
+    # RMA_ESCALATED — otherwise the next pass would treat the BMN as
+    # already-escalated and not add the comment.
+    action_cwctl = PlannedAction(
+        bmn="ss900770x4123",
+        cw_node="g75cb28",
+        sku=GH200_SKU,
+        kind=ActionKind.CW0912_RMA_ESCALATE,
+        triggering_codes=(CW0912,),
+        command=rma_return_to_triage_command("ss900770x4123"),
+        notes="",
+        jira_issue=None,
+    )
+    cand = _candidate(stage=CW0912Stage.THIRD_OCCURRENCE)
+    writes: list[CW0912State] = []
+    persist_cw0912_state_after_execute(
+        [(action_cwctl, 0)],
+        [cand],
+        state_writer=writes.append,
+        now=lambda: "2026-06-11T17:00:00Z",
+    )
+    assert writes == []
+
+
+def test_persist_skips_rma_on_failed_execution() -> None:
+    action_with_jira = PlannedAction(
+        bmn="ss900770x4123",
+        cw_node="g75cb28",
+        sku=GH200_SKU,
+        kind=ActionKind.CW0912_RMA_ESCALATE,
+        triggering_codes=(CW0912,),
+        command=None,
+        notes="",
+        jira_issue="HO-42",
+    )
+    cand = _candidate(stage=CW0912Stage.THIRD_OCCURRENCE)
+    writes: list[CW0912State] = []
+    persist_cw0912_state_after_execute(
+        [(action_with_jira, 1)],  # rc != 0
+        [cand],
+        state_writer=writes.append,
+        now=lambda: "2026-06-11T17:00:00Z",
+    )
+    assert writes == []

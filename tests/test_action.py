@@ -214,7 +214,7 @@ def test_render_plan_groups_by_kind_and_shows_totals() -> None:
     assert (
         "Totals: power-drain=2, ho-ticket=1, "
         "xid-109-return-to-ready=0, drive-inspect=0, ibp-reseat=0, "
-        "cw0912-tray-reseat=0, noop=1"
+        "cw0912-tray-reseat=0, cw0912-rma-escalate=0, noop=1"
     ) in rendered
 
 

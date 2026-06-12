@@ -1777,3 +1777,187 @@ def test_main_view_sku_action_cw0912_same_job_id_downgrades_to_noop(
     # No cwctl power-drain or tray-reseat invoked.
     assert all("cwctl flcc node" not in c for c in run_calls), run_calls
     assert all("cwctl ticket dct-action device" not in c for c in run_calls), run_calls
+
+
+# ----------------------------- view sku --action CW0912 stage 3 -------------
+
+
+def test_main_view_sku_action_cw0912_third_occurrence_adds_rma_comment_when_ho_exists(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: pytest.TempPathFactory,
+) -> None:
+    """State at TRAY_RESEAT_FILED, new AWX job_id → CW0912_RMA_ESCALATE.
+    An open HO ticket exists → JIRA runner adds the RMA template comment;
+    cwctl return-to-triage is NOT invoked."""
+    from pathlib import Path
+
+    from frops.cw0912_state import (
+        STAGE_RMA_ESCALATED,
+        STAGE_TRAY_RESEAT_FILED,
+        CW0912State,
+        read_state,
+        write_state,
+    )
+
+    state_dir = Path(str(tmp_path)) / "cw0912-state"
+    monkeypatch.setenv("FROPS_STATE_DIR", str(state_dir))
+    write_state(
+        CW0912State(
+            bmn="bmn-cw0912",
+            job_id="320200",
+            observed_at="2026-06-11T16:00:00Z",
+            stage=STAGE_TRAY_RESEAT_FILED,
+        )
+    )
+
+    monkeypatch.setenv("JIRA_EMAIL", "me@x.com")
+    monkeypatch.setenv("JIRA_TOKEN", "tok")
+
+    def _capture(cmd: str, **_kwargs: object) -> tuple[str, int]:
+        if "kubectl get bmns -o json" in cmd:
+            return (_CW0912_BMN_JSON, 0)
+        if cmd.startswith("awxstat"):
+            # New AWX job_id 320300 — different from the persisted 320200.
+            return (_awx_with_cw0912(job_id="320300"), 0)
+        return ("", 0)
+
+    monkeypatch.setattr("frops.cli.capture_command", _capture)
+
+    run_calls: list[str] = []
+    monkeypatch.setattr(
+        "frops.cli.run_command",
+        lambda cmd: run_calls.append(cmd) or 0,  # type: ignore[func-returns-value]
+    )
+
+    comments_added: list[tuple[str, str]] = []
+
+    class _FakeJIRA:
+        def __init__(self) -> None:
+            pass
+
+        def search(self, jql: str) -> list[object]:
+            from frops.jira import JIRAIssue
+
+            # HO search returns an open ticket; DO search returns nothing.
+            if 'project = "HO"' in jql:
+                return [JIRAIssue(key="HO-789", summary="...", status="Awaiting Support")]
+            return []
+
+        def add_comment(self, issue_key: str, body: str) -> None:
+            comments_added.append((issue_key, body))
+
+    monkeypatch.setattr("frops.cli.JIRAClient", _FakeJIRA)
+
+    rc = main(["view", "sku", "GPU-GH200-01", "--action", "--yes"])
+    out = capsys.readouterr().out
+    assert rc == 0
+
+    # 1. Plan shows CW0912_RMA_ESCALATE.
+    assert "[cw0912-rma-escalate] 1 node(s)" in out
+    # The resolver fired — notes mention the HO ticket.
+    assert "HO-789" in out
+
+    # 2. cwctl return-to-triage was NOT invoked (HO exists, comment path).
+    rt_calls = [c for c in run_calls if "return-to-triage" in c]
+    assert rt_calls == [], rt_calls
+
+    # 3. RMA comment landed on the HO ticket with the template content.
+    assert len(comments_added) == 1
+    issue_key, body = comments_added[0]
+    assert issue_key == "HO-789"
+    assert body.startswith("RMA to Vendor")
+    assert "Device Identifier: g-cw0912" in body
+    assert "Device SN: SN-CW0912" in body
+    assert "Component: GPU Tray" in body
+    assert "(this will be auto filled)" in body
+
+    # 4. State file advanced to RMA_ESCALATED at the new job_id.
+    new_state = read_state("bmn-cw0912")
+    assert new_state is not None
+    assert new_state.stage == STAGE_RMA_ESCALATED
+    assert new_state.job_id == "320300"
+
+
+def test_main_view_sku_action_cw0912_third_occurrence_runs_cwctl_when_no_ho(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: pytest.TempPathFactory,
+) -> None:
+    """State at TRAY_RESEAT_FILED, new AWX job_id, NO open HO ticket →
+    cwctl return-to-triage runs to create the HO ticket. The RMA comment
+    is deferred to the next --action invocation. State is NOT advanced
+    to RMA_ESCALATED yet (comment hasn't landed)."""
+    from pathlib import Path
+
+    from frops.cw0912_state import (
+        STAGE_TRAY_RESEAT_FILED,
+        CW0912State,
+        read_state,
+        write_state,
+    )
+
+    state_dir = Path(str(tmp_path)) / "cw0912-state"
+    monkeypatch.setenv("FROPS_STATE_DIR", str(state_dir))
+    write_state(
+        CW0912State(
+            bmn="bmn-cw0912",
+            job_id="320200",
+            observed_at="2026-06-11T16:00:00Z",
+            stage=STAGE_TRAY_RESEAT_FILED,
+        )
+    )
+
+    monkeypatch.setenv("JIRA_EMAIL", "me@x.com")
+    monkeypatch.setenv("JIRA_TOKEN", "tok")
+
+    def _capture(cmd: str, **_kwargs: object) -> tuple[str, int]:
+        if "kubectl get bmns -o json" in cmd:
+            return (_CW0912_BMN_JSON, 0)
+        if cmd.startswith("awxstat"):
+            return (_awx_with_cw0912(job_id="320300"), 0)
+        return ("", 0)
+
+    monkeypatch.setattr("frops.cli.capture_command", _capture)
+
+    run_calls: list[str] = []
+    monkeypatch.setattr(
+        "frops.cli.run_command",
+        lambda cmd: run_calls.append(cmd) or 0,  # type: ignore[func-returns-value]
+    )
+
+    comments_added: list[tuple[str, str]] = []
+
+    class _FakeJIRA:
+        def __init__(self) -> None:
+            pass
+
+        def search(self, _jql: str) -> list[object]:
+            return []  # no HO, no DO
+
+        def add_comment(self, issue_key: str, body: str) -> None:
+            comments_added.append((issue_key, body))
+
+    monkeypatch.setattr("frops.cli.JIRAClient", _FakeJIRA)
+
+    rc = main(["view", "sku", "GPU-GH200-01", "--action", "--yes"])
+    out = capsys.readouterr().out
+    assert rc == 0
+
+    # 1. Plan shows CW0912_RMA_ESCALATE with the cwctl fallback (no HO key).
+    assert "[cw0912-rma-escalate] 1 node(s)" in out
+
+    # 2. cwctl return-to-triage WAS invoked to create the HO ticket.
+    rt_calls = [c for c in run_calls if "return-to-triage bmn-cw0912" in c]
+    assert rt_calls, run_calls
+    assert any("Sending node to RMA" in c for c in rt_calls)
+
+    # 3. No JIRA comment added — there's no HO key yet.
+    assert comments_added == []
+
+    # 4. State must NOT advance to RMA_ESCALATED yet — the comment is
+    # what triggers that transition. The operator re-runs --action on
+    # the next pass once cwctl created the HO ticket.
+    state = read_state("bmn-cw0912")
+    assert state is not None
+    assert state.stage == STAGE_TRAY_RESEAT_FILED  # unchanged

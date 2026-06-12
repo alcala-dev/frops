@@ -76,12 +76,20 @@ class CW0912Candidate:
 
     @property
     def actionable(self) -> bool:
-        """True only for SECOND_OCCURRENCE without a DO dedup hit or JIRA error."""
-        return (
-            self.stage is CW0912Stage.SECOND_OCCURRENCE
-            and self.existing_do_ticket is None
-            and self.do_search_error is None
-        )
+        """True when the override produces a runnable action for this candidate.
+
+        SECOND_OCCURRENCE: True unless DO dedup found an existing tray-reseat
+            ticket OR the JIRA search itself failed.
+        THIRD_OCCURRENCE: Always True — the override emits a
+            `CW0912_RMA_ESCALATE` action that either adds an RMA-template
+            comment to the open HO ticket or runs cwctl return-to-triage
+            to create one.
+        Other stages: False (FIRST_OCCURRENCE leaves POWER_DRAIN alone;
+            IN_PROGRESS downgrades to NOOP).
+        """
+        if self.stage is CW0912Stage.SECOND_OCCURRENCE:
+            return self.existing_do_ticket is None and self.do_search_error is None
+        return self.stage is CW0912Stage.THIRD_OCCURRENCE
 
 
 # --- Type aliases for injectable IO ------------------------------------------
@@ -96,6 +104,51 @@ NowFn = Callable[[], str]  # returns ISO-8601 UTC
 
 
 # --- Command rendering -------------------------------------------------------
+
+
+def rma_return_to_triage_command(bmn: str) -> str:
+    """cwctl invocation used to create an HO ticket when none exists for RMA.
+
+    Mirrors the documented form (already RMA-specific in its `-m` text):
+
+      cwctl flcc node -w return-to-triage <BMN>
+            -o -m "Sending node to triage to generate HO ticket. Sending node to RMA"
+
+    The operator re-runs `view sku --action` after this cwctl creates the
+    HO ticket; the next pass finds the open HO and switches the action to
+    add the RMA-template comment instead of re-running this command.
+    """
+    return (
+        f"cwctl flcc node -w return-to-triage {bmn} "
+        '-o -m "Sending node to triage to generate HO ticket. Sending node to RMA"'
+    )
+
+
+def render_rma_template(cw_node: str, bmn: str, serial: str) -> str:
+    """Render the operator-provided RMA template with per-BMN substitutions.
+
+    `Component SN`, `Component Slot`, and `Point of Failure` are left
+    blank for the onsite tech to fill in after they pull the tray.
+    `Required logs` carries the literal "(this will be auto filled)"
+    marker so downstream automation knows to populate it.
+    """
+    identifier = cw_node or bmn
+    return (
+        "RMA to Vendor\n"
+        "\n"
+        f"Device Identifier: {identifier}\n"
+        f"Device SN: {serial}\n"
+        "\n"
+        "Component: GPU Tray\n"
+        "Component SN: \n"
+        "Component Slot: \n"
+        "\n"
+        "Point of Failure:\n"
+        "\n"
+        " \n"
+        "Required logs:\n"
+        "(this will be auto filled)"
+    )
 
 
 def tray_reseat_command(bmn: str, cw_node: str, serial: str, region: str) -> str:
@@ -304,17 +357,80 @@ def apply_cw0912_overrides(
             continue
 
         if cand.stage is CW0912Stage.THIRD_OCCURRENCE:
+            # Emit the RMA action with the cwctl return-to-triage fallback.
+            # A separate JIRA resolver pass overlays the HO lookup result —
+            # if an open HO ticket is found, the resolver replaces `command`
+            # with `jira_issue` so the JIRA runner adds the RMA template as
+            # a comment. If no HO is found, the cwctl command runs to create
+            # the ticket and the operator re-runs --action for the comment.
             out.append(
-                _to_noop(
-                    action,
+                PlannedAction(
+                    bmn=cand.bmn,
+                    cw_node=cand.cw_node,
+                    sku=action.sku,
+                    kind=ActionKind.CW0912_RMA_ESCALATE,
+                    triggering_codes=action.triggering_codes,
+                    command=rma_return_to_triage_command(cand.bmn),
                     notes=(
-                        "CW0912 third+ occurrence — tray reseat did not resolve. "
-                        "RMA escalation is the next step (phase 3, not yet implemented). "
-                        "Update the HO ticket manually for RMA processing."
+                        f"CW0912 returned a third time (AWX job {cand.current_job_id}) — "
+                        "tray reseat did not resolve. Will add an RMA-template comment "
+                        "to the open HO ticket, or run return-to-triage to create one "
+                        "(re-run --action after that to add the comment)."
                     ),
                 )
             )
     return out
+
+
+# --- HO ticket resolution for RMA escalation --------------------------------
+
+
+HOSearchFn = Callable[[tuple[str, ...]], str | None]
+
+
+def resolve_cw0912_rma_tickets(
+    actions: list[PlannedAction],
+    search_fn: HOSearchFn,
+    targets_by_bmn: dict[str, BMNTarget],
+) -> list[PlannedAction]:
+    """For each `CW0912_RMA_ESCALATE` action, find the open HO ticket.
+
+    Mirrors `frops.action.resolve_ho_tickets`: if `search_fn` returns an
+    issue key, replace `command` with None and set `jira_issue` so the
+    JIRA runner adds the RMA-template comment instead of running cwctl.
+    If nothing matches, the action is left unchanged and the cwctl
+    `return-to-triage` fallback creates the HO ticket so the operator
+    can re-run --action on the next pass.
+    """
+    resolved: list[PlannedAction] = []
+    for action in actions:
+        if action.kind is not ActionKind.CW0912_RMA_ESCALATE:
+            resolved.append(action)
+            continue
+
+        target = targets_by_bmn.get(action.bmn)
+        identifiers = target.search_identifiers if target else (action.bmn,)
+        issue_key = search_fn(identifiers)
+        if not issue_key:
+            resolved.append(action)
+            continue
+
+        resolved.append(
+            PlannedAction(
+                bmn=action.bmn,
+                cw_node=action.cw_node,
+                sku=action.sku,
+                kind=action.kind,
+                triggering_codes=action.triggering_codes,
+                command=None,  # JIRA add_comment replaces the cwctl fallback
+                notes=(
+                    f"Found open HO ticket {issue_key} — will add an RMA-template "
+                    "comment on execution."
+                ),
+                jira_issue=issue_key,
+            )
+        )
+    return resolved
 
 
 # --- Post-execution state writes --------------------------------------------
@@ -334,8 +450,16 @@ def persist_cw0912_state_after_execute(
     states for caller logging.
 
     Mapping from successful action → new stage:
-      POWER_DRAIN with CW0912 in triggering codes → POWER_DRAIN_SCHEDULED
-      CW0912_TRAY_RESEAT                          → TRAY_RESEAT_FILED
+      POWER_DRAIN with CW0912 in triggering codes  → POWER_DRAIN_SCHEDULED
+      CW0912_TRAY_RESEAT                           → TRAY_RESEAT_FILED
+      CW0912_RMA_ESCALATE (jira_issue set, comment
+          added successfully)                      → RMA_ESCALATED
+      CW0912_RMA_ESCALATE (cwctl ticket creation
+          path — no jira_issue yet)                → no state change
+          (the comment hasn't been added yet; the
+          operator re-runs --action and the next
+          pass advances the state when JIRA
+          comment lands).
     """
     by_bmn = {c.bmn: c for c in candidates}
     written: list[CW0912State] = []
@@ -358,6 +482,16 @@ def persist_cw0912_state_after_execute(
                 job_id=cand.current_job_id,
                 observed_at=now(),
                 stage=STAGE_TRAY_RESEAT_FILED,
+            )
+        elif action.kind is ActionKind.CW0912_RMA_ESCALATE and action.jira_issue is not None:
+            # Only mark RMA_ESCALATED when the JIRA comment landed —
+            # NOT for the cwctl-ticket-creation path (no jira_issue
+            # set), since the comment hasn't been written yet there.
+            state = CW0912State(
+                bmn=cand.bmn,
+                job_id=cand.current_job_id,
+                observed_at=now(),
+                stage=STAGE_RMA_ESCALATED,
             )
         else:
             continue

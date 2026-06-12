@@ -297,3 +297,37 @@ def test_append_to_description_handles_empty_existing(
 
     put_doc = calls[1]["body"]["fields"]["description"]
     assert _adf_to_text(put_doc).strip() == "only block"
+
+
+# --------------------------- add_comment ------------------------------------
+
+
+def test_add_comment_posts_adf_wrapped_body_to_comment_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _client_with_creds(monkeypatch)
+    calls: list[dict[str, Any]] = []
+
+    def _fake_urlopen(req: Any, timeout: int = 0) -> _FakeHTTPResponse:
+        calls.append(
+            {
+                "method": req.get_method(),
+                "url": req.full_url,
+                "body": json.loads(req.data) if req.data else None,
+            }
+        )
+        # JIRA returns 201 + the new comment JSON, but we don't read it.
+        return _FakeHTTPResponse(b"")
+
+    with patch("frops.jira.urllib.request.urlopen", _fake_urlopen):
+        client.add_comment("HO-42", "RMA to Vendor\n\nDevice: g123")
+
+    assert len(calls) == 1
+    assert calls[0]["method"] == "POST"
+    assert calls[0]["url"].endswith("/rest/api/3/issue/HO-42/comment")
+    # The body must be ADF-wrapped so line breaks survive the round trip.
+    body_doc = calls[0]["body"]["body"]
+    assert body_doc["type"] == "doc"
+    flat = _adf_to_text(body_doc)
+    assert "RMA to Vendor" in flat
+    assert "Device: g123" in flat

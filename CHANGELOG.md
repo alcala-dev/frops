@@ -8,6 +8,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **CW0912 progressive remediation (stage 3)** — HO ticket RMA
+  escalation when CW0912 returns a *third* time after a tray-reseat.
+  When a BMN's state file is at `tray_reseat_filed` and CW0912
+  surfaces in a new AWX job, the override emits a new
+  `ActionKind.CW0912_RMA_ESCALATE`:
+    - **Open HO ticket found** → JIRA runner calls the new
+      `JIRAClient.add_comment` to post the operator's RMA template
+      (with `$CWNODE` / `$BMN` / `$SERIALNUMBER` substituted) and
+      advances state to `rma_escalated`.
+    - **No open HO ticket** → runs cwctl `return-to-triage` to
+      create one. State is NOT advanced; the operator re-runs
+      `--action` after the HO ticket exists and the comment lands
+      on that pass.
+- New `JIRAClient.add_comment(issue_key, body)` — POSTs ADF-wrapped
+  body to `/rest/api/3/issue/{key}/comment`.
+- New `[r]ma-escalate` letter shortcut in the action group prompt.
+- The RMA-template renderer (`render_rma_template`) leaves
+  `Component SN`, `Component Slot`, and `Point of Failure` blank for
+  the onsite tech to fill in; `Required logs` carries the
+  `(this will be auto filled)` marker so downstream automation knows
+  to populate it.
+
+### Added
 - **CW0912 progressive remediation (stage 2)** — DCT tray-reseat
   escalation when CW0912 returns in a *different* AWX job after a
   prior stage-1 power-drain. Per-BMN state file at

@@ -143,6 +143,19 @@ class JIRAClient:
             {"fields": {"description": _wrap_as_adf(new_description)}},
         )
 
+    def add_comment(self, issue_key: str, body: str) -> None:
+        """Post a comment to an issue via POST `/rest/api/3/issue/{key}/comment`.
+
+        `body` is a plain-text/wiki string — we wrap as ADF before sending so
+        line breaks survive intact (JIRA Cloud's v3 API rejects raw strings
+        for the comment body field).
+        """
+        self._request(
+            "POST",
+            f"/rest/api/3/issue/{issue_key}/comment",
+            {"body": _wrap_as_adf(body)},
+        )
+
     def fetch_description(self, issue_key: str) -> str:
         """Plain-text view of an issue's Description (ADF flattened to text).
 

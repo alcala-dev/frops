@@ -54,6 +54,13 @@ class ActionKind(str, Enum):
     # onsite to reseat the GPU tray. Dedups against open DO tickets the
     # same way drive_inspect / ibp_reseat do.
     CW0912_TRAY_RESEAT = "cw0912-tray-reseat"
+    # Set on the *third* CW0912 occurrence — tray reseat didn't resolve,
+    # the node needs RMA. The action either adds an RMA-template comment
+    # to the open HO ticket (when one exists in JIRA — `jira_issue` set)
+    # or runs cwctl return-to-triage to create the HO ticket so the
+    # operator can re-run --action and the comment lands on the next
+    # pass (`command` set).
+    CW0912_RMA_ESCALATE = "cw0912-rma-escalate"
     NOOP = "noop"
 
 
@@ -277,6 +284,7 @@ def render_plan(actions: list[PlannedAction]) -> str:
         ActionKind.DRIVE_INSPECT,
         ActionKind.IBP_RESEAT,
         ActionKind.CW0912_TRAY_RESEAT,
+        ActionKind.CW0912_RMA_ESCALATE,
         ActionKind.NOOP,
     ):
         bucket = by_kind.get(kind, [])

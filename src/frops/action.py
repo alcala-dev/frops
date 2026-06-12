@@ -48,6 +48,12 @@ class ActionKind(str, Enum):
     # existing open DO ticket about ibp work. Remediation is a
     # `cwctl ticket dct-action network ...` for onsite reseat/clean.
     IBP_RESEAT = "ibp-reseat"
+    # Set by the CW0912 remediation pipeline (frops.cw0912_remediation) on
+    # a *second* occurrence of CW0912 against a fresh AWX job ID: power-
+    # drain didn't clear the failure, so we file a DCT ticket asking
+    # onsite to reseat the GPU tray. Dedups against open DO tickets the
+    # same way drive_inspect / ibp_reseat do.
+    CW0912_TRAY_RESEAT = "cw0912-tray-reseat"
     NOOP = "noop"
 
 
@@ -112,6 +118,18 @@ class BMNTarget:
         for report in self.awx_reports:
             codes.extend(report.cw_error_codes)
         return tuple(codes)
+
+    def first_job_id_for_code(self, code: str) -> str | None:
+        """Return the AWX job_id of the first report that carried `code`.
+
+        Used by the CW0912 state machine to compare current job_id
+        against the persisted one. Returns None when no report carries
+        the code, or when the matching report has no `job_id` header.
+        """
+        for report in self.awx_reports:
+            if any(err.code == code for err in report.cw_error_codes) and report.job_id:
+                return report.job_id
+        return None
 
 
 @dataclass(frozen=True)
@@ -258,6 +276,7 @@ def render_plan(actions: list[PlannedAction]) -> str:
         ActionKind.XID_109_RETURN_TO_READY,
         ActionKind.DRIVE_INSPECT,
         ActionKind.IBP_RESEAT,
+        ActionKind.CW0912_TRAY_RESEAT,
         ActionKind.NOOP,
     ):
         bucket = by_kind.get(kind, [])

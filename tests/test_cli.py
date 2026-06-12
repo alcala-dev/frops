@@ -1541,3 +1541,239 @@ def test_main_view_sku_action_yes_dry_run_mentions_execute_intent(
     assert captures == [], "dry-run must not invoke kubectl/awxstat"
     assert "would also fetch JSON BMN data" in out
     assert "execute" in out
+
+
+# ----------------------------- view sku --action CW0912 stage 2 -------------
+
+
+_CW0912_BMN_JSON = json.dumps(
+    {
+        "items": [
+            {
+                "metadata": {
+                    "name": "bmn-cw0912",
+                    "labels": {
+                        "ds.coreweave.com/sku.cw-sku": "GPU-GH200-01",
+                        "ds.coreweave.com/status.asset.serial": "SN-CW0912",
+                        "ds.coreweave.com/physical-topology.zone": "RNO2A",
+                        "flcc.coreweave.com/workflow": "return-to-prod",
+                    },
+                },
+                "status": {"reportedNodeInfo": {"nodeName": "g-cw0912"}},
+            }
+        ]
+    }
+)
+
+
+def _awx_with_cw0912(job_id: str = "320200") -> str:
+    """awxstat output for a BMN with CW0912 + a known Job ID."""
+    return (
+        "Node:       SN-CW0912\n"
+        f"Job ID:     {job_id}\n"
+        "Job Status: failed\n\n"
+        "cw_error_codes={\n"
+        "  CW0912: GPU link timeout\n"
+        "}\n"
+    )
+
+
+def test_main_view_sku_action_cw0912_second_occurrence_files_tray_reseat(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: pytest.TempPathFactory,
+) -> None:
+    """Pre-populates state file with stage=power_drain_scheduled at a
+    different job_id; AWX returns CW0912 at a *new* job_id. Expect:
+      - CW0912_TRAY_RESEAT action in the plan
+      - `cwctl ticket dct-action device` invoked on `--yes`
+      - state file rewritten to stage=tray_reseat_filed at new job_id
+    """
+    from pathlib import Path
+
+    from frops.cw0912_state import (
+        STAGE_POWER_DRAIN_SCHEDULED,
+        STAGE_TRAY_RESEAT_FILED,
+        CW0912State,
+        read_state,
+        write_state,
+    )
+
+    # Override the autouse state dir fixture with a path we can inspect.
+    state_dir = Path(str(tmp_path)) / "cw0912-state"
+    monkeypatch.setenv("FROPS_STATE_DIR", str(state_dir))
+
+    # Pre-existing state for "bmn-cw0912" at job_id=320078, stage=power_drain.
+    write_state(
+        CW0912State(
+            bmn="bmn-cw0912",
+            job_id="320078",
+            observed_at="2026-06-11T16:00:00Z",
+            stage=STAGE_POWER_DRAIN_SCHEDULED,
+        )
+    )
+
+    monkeypatch.setenv("JIRA_EMAIL", "me@x.com")
+    monkeypatch.setenv("JIRA_TOKEN", "tok")
+
+    def _capture(cmd: str, **_kwargs: object) -> tuple[str, int]:
+        if "kubectl get bmns -o json" in cmd:
+            return (_CW0912_BMN_JSON, 0)
+        if cmd.startswith("awxstat"):
+            # Current AWX job is 320200 — different from the persisted 320078.
+            return (_awx_with_cw0912(job_id="320200"), 0)
+        return ("", 0)
+
+    monkeypatch.setattr("frops.cli.capture_command", _capture)
+
+    run_calls: list[str] = []
+    monkeypatch.setattr(
+        "frops.cli.run_command",
+        lambda cmd: run_calls.append(cmd) or 0,  # type: ignore[func-returns-value]
+    )
+
+    class _FakeJIRA:
+        def __init__(self) -> None:
+            pass
+
+        def search(self, _jql: str) -> list[object]:
+            return []  # no existing DO tray reseat
+
+    monkeypatch.setattr("frops.cli.JIRAClient", _FakeJIRA)
+
+    rc = main(["view", "sku", "GPU-GH200-01", "--action", "--yes"])
+    out = capsys.readouterr().out
+    assert rc == 0
+
+    # 1. Plan shows CW0912_TRAY_RESEAT (the override fired).
+    assert "[cw0912-tray-reseat] 1 node(s)" in out
+    assert "bmn-cw0912" in out
+    # The diagnostic note references both job IDs.
+    assert "320200" in out
+    assert "320078" in out
+
+    # 2. cwctl tray-reseat command was actually executed.
+    dct_calls = [c for c in run_calls if "cwctl ticket dct-action device" in c]
+    assert any("Please reseat the GPU tray" in c for c in dct_calls), dct_calls
+    assert any("-r RNO2A" in c for c in dct_calls), dct_calls
+
+    # 3. State file was rewritten — stage advanced and job_id updated to
+    # match the current AWX job.
+    new_state = read_state("bmn-cw0912")
+    assert new_state is not None
+    assert new_state.stage == STAGE_TRAY_RESEAT_FILED
+    assert new_state.job_id == "320200"
+
+
+def test_main_view_sku_action_cw0912_first_occurrence_keeps_power_drain(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No pre-existing state → stage 1 path (POWER_DRAIN + at-scheduling).
+    Confirms the override does NOT misfire when there's no prior state."""
+    monkeypatch.setenv("JIRA_EMAIL", "me@x.com")
+    monkeypatch.setenv("JIRA_TOKEN", "tok")
+
+    def _capture(cmd: str, **_kwargs: object) -> tuple[str, int]:
+        if "kubectl get bmns -o json" in cmd:
+            return (_CW0912_BMN_JSON, 0)
+        if cmd.startswith("awxstat"):
+            return (_awx_with_cw0912(job_id="320078"), 0)
+        return ("", 0)
+
+    monkeypatch.setattr("frops.cli.capture_command", _capture)
+
+    # Stub at(1) to a no-op success so the stage-1 follow-up doesn't try
+    # to actually schedule anything.
+    monkeypatch.setattr("frops.cw0912.schedule_at", lambda _cmd, _when: (True, "job 1 at <fake>"))
+
+    run_calls: list[str] = []
+    monkeypatch.setattr(
+        "frops.cli.run_command",
+        lambda cmd: run_calls.append(cmd) or 0,  # type: ignore[func-returns-value]
+    )
+
+    class _FakeJIRA:
+        def __init__(self) -> None:
+            pass
+
+        def search(self, _jql: str) -> list[object]:
+            return []
+
+    monkeypatch.setattr("frops.cli.JIRAClient", _FakeJIRA)
+
+    rc = main(["view", "sku", "GPU-GH200-01", "--action", "--yes"])
+    out = capsys.readouterr().out
+    assert rc == 0
+
+    # No CW0912_TRAY_RESEAT in the plan — power-drain wins on first occurrence.
+    assert "[cw0912-tray-reseat]" not in out
+    assert "[power-drain] 1 node(s)" in out
+    pd_calls = [c for c in run_calls if "power-drain bmn-cw0912" in c]
+    assert pd_calls, run_calls
+    # Stage-1 scheduling info block appears.
+    assert "CW0912 node-zap reruns scheduled" in out
+
+
+def test_main_view_sku_action_cw0912_same_job_id_downgrades_to_noop(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: pytest.TempPathFactory,
+) -> None:
+    """Operator re-runs --action before the at-job fires: same AWX job_id
+    → IN_PROGRESS → NOOP with a 'wait' note. No cwctl power-drain runs."""
+    from pathlib import Path
+
+    from frops.cw0912_state import STAGE_POWER_DRAIN_SCHEDULED, CW0912State, write_state
+
+    state_dir = Path(str(tmp_path)) / "cw0912-state"
+    monkeypatch.setenv("FROPS_STATE_DIR", str(state_dir))
+    write_state(
+        CW0912State(
+            bmn="bmn-cw0912",
+            job_id="320078",
+            observed_at="2026-06-11T16:00:00Z",
+            stage=STAGE_POWER_DRAIN_SCHEDULED,
+        )
+    )
+
+    monkeypatch.setenv("JIRA_EMAIL", "me@x.com")
+    monkeypatch.setenv("JIRA_TOKEN", "tok")
+
+    def _capture(cmd: str, **_kwargs: object) -> tuple[str, int]:
+        if "kubectl get bmns -o json" in cmd:
+            return (_CW0912_BMN_JSON, 0)
+        if cmd.startswith("awxstat"):
+            return (_awx_with_cw0912(job_id="320078"), 0)  # same job_id
+        return ("", 0)
+
+    monkeypatch.setattr("frops.cli.capture_command", _capture)
+
+    run_calls: list[str] = []
+    monkeypatch.setattr(
+        "frops.cli.run_command",
+        lambda cmd: run_calls.append(cmd) or 0,  # type: ignore[func-returns-value]
+    )
+
+    class _FakeJIRA:
+        def __init__(self) -> None:
+            pass
+
+        def search(self, _jql: str) -> list[object]:
+            return []
+
+    monkeypatch.setattr("frops.cli.JIRAClient", _FakeJIRA)
+
+    rc = main(["view", "sku", "GPU-GH200-01", "--action", "--yes"])
+    out = capsys.readouterr().out
+    assert rc == 0
+
+    # Skipped block surfaces the in-progress note.
+    assert "in_progress" in out
+    assert "wait for the scheduled node-zap rerun" in out
+    # The plan shows NOOP instead of POWER_DRAIN / CW0912_TRAY_RESEAT.
+    assert "[power-drain]" not in out
+    assert "[cw0912-tray-reseat]" not in out
+    # No cwctl power-drain or tray-reseat invoked.
+    assert all("cwctl flcc node" not in c for c in run_calls), run_calls
+    assert all("cwctl ticket dct-action device" not in c for c in run_calls), run_calls

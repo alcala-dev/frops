@@ -91,6 +91,7 @@ from frops.jira import (
 from frops.view_table import render_sku_view_table
 from frops.xid109 import (
     XID109Candidate,
+    build_xid109_ho_search_jql,
     collect_xid109_candidates,
     fetch_phase_reason,
     parse_cwnc_states,
@@ -660,8 +661,16 @@ def _maybe_run_xid109_pipeline(
         return [], []
 
     def _search(identifiers: tuple[str, ...]) -> str | None:
+        # Use the XID-109-specific JQL (`statusCategory != "Done"` +
+        # summary AND description match) instead of the default
+        # `JIRA_OPEN_STATUSES = ("Awaiting Support",)` filter — XID-109
+        # HO tickets routinely sit in other in-progress statuses by
+        # the time the operator runs `--action`, and the narrow filter
+        # was silently dropping real triage nodes from the list.
+        jql = build_xid109_ho_search_jql(identifiers)
+        if jql is None:
+            return None
         try:
-            jql = build_search_jql(JIRA_PROJECT, identifiers, JIRA_OPEN_STATUSES)
             issues = jira_client.search(jql)
         except (JIRAError, ValueError) as exc:
             print(

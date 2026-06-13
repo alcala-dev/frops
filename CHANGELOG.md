@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- XID-109 discovery was silently dropping nodes that should have
+  appeared in the actionable / waiting tables:
+    1. **HO search status filter was too narrow.** The pipeline used
+       `status = "Awaiting Support"` (the default for HO_TICKET
+       resolution), so XID-109 HO tickets that had moved to any other
+       live status (Triage, In Progress, Investigating, …) were
+       skipped. Replaced with a dedicated `build_xid109_ho_search_jql`
+       that uses `statusCategory != "Done"` (any non-resolved ticket).
+    2. **CWNC-STATE was a hard inclusion gate.** Nodes that had
+       exited production but hadn't propagated to `CWNC-STATE=triage`
+       yet were dropped before JIRA was even queried. The upstream
+       SKU view already excludes healthy nodes (`production`/`ready`/
+       `rma`/`broken`), so the in-pipeline gate was over-restrictive.
+       Moved CWNC-STATE into the actionable-vs-waiting classifier
+       only — nodes still in transit toward triage now surface under
+       the "waiting" list so the operator sees the full XID-109
+       fall-out in one view.
+    3. The new JQL also searches `summary ~ "id" OR description ~ "id"`
+       (not just summary), so HO tickets that mention the BMN only in
+       their body are surfaced too.
+- `classify_xid109_target` now gates `actionable` on BOTH
+  `cwnc_state == "triage"` AND `phase_reason == "nlcc"`. Previously
+  the cwnc_state check lived implicitly in the caller's filter; now
+  that the filter is gone, the classifier carries the full rule.
+
 ### Added
 - **CW0912 progressive remediation (stage 3)** — HO ticket RMA
   escalation when CW0912 returns a *third* time after a tray-reseat.

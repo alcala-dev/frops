@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from frops.action import BMNTarget
 from frops.xid109 import (
+    HO_PROJECT,
     NLCC_OWNS_REASON,
     XID109Candidate,
+    build_xid109_ho_search_jql,
     classify_xid109_target,
     collect_xid109_candidates,
     description_mentions_xid_109,
@@ -110,6 +112,37 @@ def test_parse_cwnc_states_returns_empty_on_empty_input() -> None:
     assert parse_cwnc_states("only-header\n") == {}
 
 
+# --------------------------- build_xid109_ho_search_jql ---------------------
+
+
+def test_xid109_ho_jql_quotes_HO_and_uses_status_category_not_done() -> None:
+    jql = build_xid109_ho_search_jql(("ss900770x4123", "g75cb28"))
+    assert jql is not None
+    # `HO` would be safe unquoted but we quote for parity with the DO
+    # builders + any future project key that collides with reserved JQL.
+    assert f'project = "{HO_PROJECT}"' in jql
+    # `statusCategory != "Done"` is the wider gate replacing the previous
+    # `status = "Awaiting Support"` filter — that narrow filter was
+    # silently dropping XID-109 tickets in other in-progress statuses.
+    assert 'statusCategory != "Done"' in jql
+    # Identifiers feed BOTH summary AND description clauses so an HO
+    # ticket that mentions the BMN only in its body still surfaces.
+    for ident in ("ss900770x4123", "g75cb28"):
+        assert f'summary ~ "{ident}"' in jql
+        assert f'description ~ "{ident}"' in jql
+
+
+def test_xid109_ho_jql_returns_none_when_no_identifiers() -> None:
+    assert build_xid109_ho_search_jql(()) is None
+    assert build_xid109_ho_search_jql(("", "")) is None
+
+
+def test_xid109_ho_jql_escapes_double_quotes() -> None:
+    jql = build_xid109_ho_search_jql(('weird"id',))
+    assert jql is not None
+    assert r"weird\"id" in jql
+
+
 # --------------------------- classify_xid109_target -------------------------
 
 
@@ -136,21 +169,40 @@ def test_classify_waiting_when_phase_reason_is_anything_else() -> None:
         assert cand.actionable is False, f"reason {reason!r} should be waiting"
 
 
+def test_classify_waiting_when_cwnc_state_not_yet_triage() -> None:
+    # Phase reason says nlcc but CWNC-STATE hasn't propagated to triage
+    # yet — node still in transit, not actionable. Without the cwnc_state
+    # gate in classify this would be incorrectly marked actionable.
+    for state in ("draining", "post-prod", "", "production"):
+        cand = classify_xid109_target(
+            target=_target(),
+            cwnc_state=state,
+            phase_reason=NLCC_OWNS_REASON,
+            jira_issue="HO-1",
+        )
+        assert cand.actionable is False, f"cwnc_state {state!r} should be waiting"
+
+
 # --------------------------- collect_xid109_candidates ----------------------
 
 
-def test_collect_filters_to_triage_then_jira_then_description() -> None:
+def test_collect_filters_via_jira_then_description_not_cwnc_state() -> None:
+    # The CWNC-STATE filter is NOT a hard gate any more — XID-109 nodes
+    # that have exited production but haven't propagated to CWNC-STATE
+    # =triage yet still need to surface (under the waiting list) so the
+    # operator sees the full fall-out. The HO description match remains
+    # the authoritative inclusion signal.
     targets = [
-        _target(bmn="triage-xid"),  # full pipeline pass → actionable
-        _target(bmn="triage-noxid"),  # JIRA matches but no XID 109 in desc
-        _target(bmn="triage-nojira"),  # no JIRA match
-        _target(bmn="not-triage"),  # filtered out at stage 1
+        _target(bmn="triage-xid"),  # CWNC-STATE=triage + XID 109 desc + nlcc → actionable
+        _target(bmn="in-transit-xid"),  # CWNC-STATE not yet triage + XID 109 desc → waiting
+        _target(bmn="triage-noxid"),  # CWNC-STATE=triage, HO matches but no XID 109 → dropped
+        _target(bmn="triage-nojira"),  # CWNC-STATE=triage, no HO match → dropped
     ]
     cwnc_states = {
         "triage-xid": "triage",
+        "in-transit-xid": "draining",  # exited production but not yet at triage
         "triage-noxid": "triage",
         "triage-nojira": "triage",
-        "not-triage": "production",
     }
     jira_search_calls: list[tuple[str, ...]] = []
 
@@ -158,6 +210,8 @@ def test_collect_filters_to_triage_then_jira_then_description() -> None:
         jira_search_calls.append(identifiers)
         if "triage-xid" in identifiers:
             return "HO-1"
+        if "in-transit-xid" in identifiers:
+            return "HO-3"
         if "triage-noxid" in identifiers:
             return "HO-2"
         return None  # triage-nojira
@@ -165,6 +219,7 @@ def test_collect_filters_to_triage_then_jira_then_description() -> None:
     descriptions = {
         "HO-1": "Server failed XID 109 in production",
         "HO-2": "Server is reporting some other condition; XID 79",
+        "HO-3": "Node hit XID 109 and exited production",
     }
     fetch_phase_calls: list[str] = []
 
@@ -180,16 +235,24 @@ def test_collect_filters_to_triage_then_jira_then_description() -> None:
         fetch_phase=_fetch_phase,
     )
 
-    # Only triage-xid survives the full pipeline.
-    assert [c.bmn for c in candidates] == ["triage-xid"]
-    assert candidates[0].actionable is True
-    # not-triage was filtered before JIRA was queried for it.
-    assert all("not-triage" not in ids for ids in jira_search_calls)
-    # phase fetch only happens for BMNs that survive the description filter.
-    assert fetch_phase_calls == ["triage-xid"]
+    # Both XID-109 nodes survive — the one at triage and the one still in transit.
+    assert {c.bmn for c in candidates} == {"triage-xid", "in-transit-xid"}
+    by_bmn = {c.bmn: c for c in candidates}
+    # Only the one at triage+nlcc is actionable.
+    assert by_bmn["triage-xid"].actionable is True
+    # The in-transit one shows up but isn't actionable — it lands in the
+    # waiting list so the operator still sees it.
+    assert by_bmn["in-transit-xid"].actionable is False
+    assert by_bmn["in-transit-xid"].cwnc_state == "draining"
+    # JIRA is queried for every target now (cwnc_state isn't a gate).
+    assert len(jira_search_calls) == len(targets)
+    # phase fetch runs only for BMNs that survive the description filter.
+    assert sorted(fetch_phase_calls) == ["in-transit-xid", "triage-xid"]
 
 
-def test_collect_emits_waiting_when_phase_reason_is_not_nlcc() -> None:
+def test_collect_marks_triage_with_non_nlcc_phase_as_waiting() -> None:
+    # CWNC-STATE=triage but PhaseState reason=flcc → not yet eligible for
+    # return-to-ready; should appear in the waiting list, not actionable.
     targets = [_target(bmn="bmn-waiting")]
     candidates = collect_xid109_candidates(
         targets,
@@ -199,9 +262,9 @@ def test_collect_emits_waiting_when_phase_reason_is_not_nlcc() -> None:
         fetch_phase=lambda _bmn: "flcc",
     )
     (cand,) = candidates
-    assert cand.bmn == "bmn-waiting"
     assert cand.actionable is False
     assert cand.phase_reason == "flcc"
+    assert cand.cwnc_state == "triage"
 
 
 # --------------------------- split_by_actionable ----------------------------

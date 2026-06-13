@@ -57,6 +57,40 @@ JIRASearchFn = Callable[[tuple[str, ...]], str | None]
 TRIAGE_STATE: str = "triage"
 NLCC_OWNS_REASON: str = "nlcc"
 
+# JIRA project + status filter for the XID-109 HO lookup. We use the
+# broader `statusCategory != "Done"` (i.e. any non-resolved ticket)
+# rather than `status = "Awaiting Support"` like the HO_TICKET path:
+# XID-109 nodes routinely have HO tickets in other in-progress
+# statuses (Triage, In Progress, Investigating) by the time the
+# operator runs `view sku --action`, and silently dropping them was
+# hiding real triage nodes from the actionable list.
+HO_PROJECT: str = "HO"
+HO_NON_DONE_JQL: str = 'statusCategory != "Done"'
+
+
+def _escape_jql_text(value: str) -> str:
+    """JQL text-value escape — backslash + double-quote."""
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def build_xid109_ho_search_jql(identifiers: tuple[str, ...]) -> str | None:
+    """JQL for finding any non-Done HO ticket matching this BMN's identifiers.
+
+    The text-match operator `~` is case-insensitive and handles
+    whitespace; identifiers go through both summary AND description
+    so an HO ticket that mentions the BMN only in its body (rather
+    than its title) still surfaces. Returns None when no usable
+    identifiers are present so the caller can short-circuit.
+    """
+    cleaned = [i for i in identifiers if i]
+    if not cleaned:
+        return None
+    id_clauses = " OR ".join(
+        f'summary ~ "{_escape_jql_text(i)}" OR description ~ "{_escape_jql_text(i)}"'
+        for i in cleaned
+    )
+    return f'project = "{HO_PROJECT}" AND {HO_NON_DONE_JQL} AND ({id_clauses})'
+
 
 @dataclass(frozen=True)
 class XID109Candidate:
@@ -134,13 +168,19 @@ def classify_xid109_target(
     phase_reason: str,
     jira_issue: str,
 ) -> XID109Candidate:
-    """Build the candidate record for a single triage-XID-109 BMN.
+    """Build the candidate record for one XID-109 BMN.
 
-    `actionable` flips True only when nlcc has taken over after flcc
-    (PhaseState reason == "nlcc"), which we treat as "both controllers
-    have reached triage". Any other reason — including the more common
-    intermediate values during return-to-fleetops propagation — leaves
-    the candidate in the waiting list.
+    `actionable` flips True only when BOTH conditions hold:
+      - `cwnc_state == "triage"` (the unified state machine has
+        finished moving the node to triage), AND
+      - `phase_reason == "nlcc"` (NLCC has taken over after FLCC,
+        meaning both controllers have reached triage and the node
+        is eligible for `cwctl flcc node -w return-to-ready`).
+
+    Any other combination — including BMNs that have exited
+    production but are still propagating toward triage — leaves the
+    candidate in the waiting list, so the operator can see the full
+    fall-out from XID-109 in one view.
     """
     return XID109Candidate(
         bmn=target.bmn,
@@ -149,7 +189,7 @@ def classify_xid109_target(
         cwnc_state=cwnc_state,
         phase_reason=phase_reason,
         jira_issue=jira_issue,
-        actionable=phase_reason == NLCC_OWNS_REASON,
+        actionable=cwnc_state == TRIAGE_STATE and phase_reason == NLCC_OWNS_REASON,
     )
 
 
@@ -168,7 +208,7 @@ def collect_xid109_candidates(
     fetch_description: FetchDescriptionFn,
     fetch_phase: Callable[[str], str],
 ) -> list[XID109Candidate]:
-    """Pipeline: triage filter → JIRA match → description scan → phase read.
+    """Pipeline: JIRA match → description scan → phase read → classify.
 
     Each stage filters out non-qualifying BMNs before the next (more
     expensive) shell-out runs. `jira_search`, `fetch_description`, and
@@ -176,28 +216,37 @@ def collect_xid109_candidates(
     closures around JIRAClient / capture_command.
 
     A BMN appears in the output iff:
-      1. cwnc_states[bmn] == "triage", AND
-      2. jira_search returns a non-None HO issue key, AND
-      3. fetch_description for that key contains an XID 109 mention.
+      1. jira_search returns a non-None HO issue key, AND
+      2. fetch_description for that key contains an XID 109 mention.
 
-    For surviving BMNs, fetch_phase is called to fill the PhaseState
-    reason, which decides actionable vs waiting.
+    The upstream SKU view already excludes healthy nodes
+    (production/ready/rma/broken — see `catalog.SKU_EXCLUDED_STATES`),
+    so any surviving target has effectively *exited production*. The
+    CWNC-STATE value is NOT used as a hard inclusion filter here — it
+    only drives the actionable-vs-waiting classification downstream
+    (via `classify_xid109_target`). That's deliberate: nodes that have
+    exited production but haven't propagated to CWNC-STATE=triage yet
+    still need to be surfaced under the waiting list so the operator
+    sees the full XID-109 fall-out in one view.
+
+    For each surviving BMN, fetch_phase is called to fill the
+    PhaseState reason, which combines with cwnc_state to decide
+    actionable vs waiting.
     """
     candidates: list[XID109Candidate] = []
     for target in targets:
-        if cwnc_states.get(target.bmn) != TRIAGE_STATE:
-            continue
         identifiers = target.search_identifiers or (target.bmn,)
         issue_key = jira_search(identifiers)
         if not issue_key:
             continue
         if not description_mentions_xid_109(fetch_description(issue_key)):
             continue
+        cwnc_state = cwnc_states.get(target.bmn, "")
         phase_reason = fetch_phase(target.bmn)
         candidates.append(
             classify_xid109_target(
                 target=target,
-                cwnc_state=TRIAGE_STATE,
+                cwnc_state=cwnc_state,
                 phase_reason=phase_reason,
                 jira_issue=issue_key,
             )

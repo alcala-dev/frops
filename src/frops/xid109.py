@@ -57,6 +57,16 @@ JIRASearchFn = Callable[[tuple[str, ...]], str | None]
 TRIAGE_STATE: str = "triage"
 NLCC_OWNS_REASON: str = "nlcc"
 
+# CWNC-STATE values that mean "node is healthy from NLCC's perspective".
+# We exclude these from the XID-109 lists even when FLCC has the node
+# out of production — `CWNC-STATE` (NLCC's view) lags `flcc.coreweave.com/
+# state` (FLCC's view, which the SKU query already filters on), so a node
+# that FLCC has begun evicting can still show `CWNC-STATE=production`
+# until NLCC catches up. The operator wants to act on nodes once they
+# have actually left production from NLCC's view, not while they're
+# still steady-state.
+CWNC_EXCLUDED_STATES: frozenset[str] = frozenset({"production"})
+
 # JIRA project + status filter for the XID-109 HO lookup. We use the
 # broader `statusCategory != "Done"` (i.e. any non-resolved ticket)
 # rather than `status = "Awaiting Support"` like the HO_TICKET path:
@@ -216,18 +226,19 @@ def collect_xid109_candidates(
     closures around JIRAClient / capture_command.
 
     A BMN appears in the output iff:
-      1. jira_search returns a non-None HO issue key, AND
-      2. fetch_description for that key contains an XID 109 mention.
+      1. cwnc_states[bmn] is NOT a CWNC-healthy state (i.e. not
+         `production` — see `CWNC_EXCLUDED_STATES`), AND
+      2. jira_search returns a non-None HO issue key, AND
+      3. fetch_description for that key contains an XID 109 mention.
 
-    The upstream SKU view already excludes healthy nodes
-    (production/ready/rma/broken — see `catalog.SKU_EXCLUDED_STATES`),
-    so any surviving target has effectively *exited production*. The
-    CWNC-STATE value is NOT used as a hard inclusion filter here — it
-    only drives the actionable-vs-waiting classification downstream
-    (via `classify_xid109_target`). That's deliberate: nodes that have
-    exited production but haven't propagated to CWNC-STATE=triage yet
-    still need to be surfaced under the waiting list so the operator
-    sees the full XID-109 fall-out in one view.
+    The CWNC exclusion is deliberately narrower than the upstream
+    SKU view's FLCC-state filter: `CWNC-STATE` (NLCC's view) lags
+    `flcc.coreweave.com/state`, so a node that FLCC has begun
+    evicting can still show `CWNC-STATE=production` for a while.
+    The operator wants to see nodes only once NLCC also agrees
+    they've left production — but they still want everything from
+    that point onward (evict-to-triage / return-to-fleet /
+    return-to-triage workflows and triage states all surface here).
 
     For each surviving BMN, fetch_phase is called to fill the
     PhaseState reason, which combines with cwnc_state to decide
@@ -235,13 +246,15 @@ def collect_xid109_candidates(
     """
     candidates: list[XID109Candidate] = []
     for target in targets:
+        cwnc_state = cwnc_states.get(target.bmn, "")
+        if cwnc_state in CWNC_EXCLUDED_STATES:
+            continue
         identifiers = target.search_identifiers or (target.bmn,)
         issue_key = jira_search(identifiers)
         if not issue_key:
             continue
         if not description_mentions_xid_109(fetch_description(issue_key)):
             continue
-        cwnc_state = cwnc_states.get(target.bmn, "")
         phase_reason = fetch_phase(target.bmn)
         candidates.append(
             classify_xid109_target(

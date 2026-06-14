@@ -186,21 +186,28 @@ def test_classify_waiting_when_cwnc_state_not_yet_triage() -> None:
 # --------------------------- collect_xid109_candidates ----------------------
 
 
-def test_collect_filters_via_jira_then_description_not_cwnc_state() -> None:
-    # The CWNC-STATE filter is NOT a hard gate any more — XID-109 nodes
-    # that have exited production but haven't propagated to CWNC-STATE
-    # =triage yet still need to surface (under the waiting list) so the
-    # operator sees the full fall-out. The HO description match remains
-    # the authoritative inclusion signal.
+def test_collect_filters_jira_description_and_excludes_cwnc_production() -> None:
+    # The CWNC-STATE filter is narrower than before: we EXCLUDE only
+    # `production` (NLCC lags FLCC, so a node FLCC has begun evicting
+    # may still show CWNC-STATE=production). Other non-production states
+    # (flcc, triage, draining, etc.) all surface under the waiting list
+    # — operators want to see the full fall-out once NLCC has moved
+    # the node out of production too.
     targets = [
-        _target(bmn="triage-xid"),  # CWNC-STATE=triage + XID 109 desc + nlcc → actionable
-        _target(bmn="in-transit-xid"),  # CWNC-STATE not yet triage + XID 109 desc → waiting
-        _target(bmn="triage-noxid"),  # CWNC-STATE=triage, HO matches but no XID 109 → dropped
-        _target(bmn="triage-nojira"),  # CWNC-STATE=triage, no HO match → dropped
+        _target(bmn="triage-xid"),  # CWNC-STATE=triage + XID 109 + nlcc → actionable
+        _target(bmn="flcc-xid"),  # CWNC-STATE=flcc + XID 109 → waiting
+        _target(bmn="draining-xid"),  # CWNC-STATE=draining + XID 109 → waiting
+        _target(
+            bmn="prod-xid"
+        ),  # CWNC-STATE=production + XID 109 → dropped (NLCC hasn't caught up)
+        _target(bmn="triage-noxid"),  # CWNC-STATE=triage but no XID 109 in desc → dropped
+        _target(bmn="triage-nojira"),  # CWNC-STATE=triage but no HO match → dropped
     ]
     cwnc_states = {
         "triage-xid": "triage",
-        "in-transit-xid": "draining",  # exited production but not yet at triage
+        "flcc-xid": "flcc",
+        "draining-xid": "draining",
+        "prod-xid": "production",
         "triage-noxid": "triage",
         "triage-nojira": "triage",
     }
@@ -210,16 +217,19 @@ def test_collect_filters_via_jira_then_description_not_cwnc_state() -> None:
         jira_search_calls.append(identifiers)
         if "triage-xid" in identifiers:
             return "HO-1"
-        if "in-transit-xid" in identifiers:
+        if "flcc-xid" in identifiers:
             return "HO-3"
+        if "draining-xid" in identifiers:
+            return "HO-4"
         if "triage-noxid" in identifiers:
             return "HO-2"
-        return None  # triage-nojira
+        return None  # triage-nojira (also: prod-xid never reaches search)
 
     descriptions = {
         "HO-1": "Server failed XID 109 in production",
         "HO-2": "Server is reporting some other condition; XID 79",
-        "HO-3": "Node hit XID 109 and exited production",
+        "HO-3": "Node hit XID 109 and entered flcc-triage",
+        "HO-4": "XID 109 detected; node is draining",
     }
     fetch_phase_calls: list[str] = []
 
@@ -235,19 +245,17 @@ def test_collect_filters_via_jira_then_description_not_cwnc_state() -> None:
         fetch_phase=_fetch_phase,
     )
 
-    # Both XID-109 nodes survive — the one at triage and the one still in transit.
-    assert {c.bmn for c in candidates} == {"triage-xid", "in-transit-xid"}
+    # All non-production XID-109 nodes surface; prod-xid is excluded.
+    assert {c.bmn for c in candidates} == {"triage-xid", "flcc-xid", "draining-xid"}
     by_bmn = {c.bmn: c for c in candidates}
-    # Only the one at triage+nlcc is actionable.
+    # Only the triage+nlcc one is actionable.
     assert by_bmn["triage-xid"].actionable is True
-    # The in-transit one shows up but isn't actionable — it lands in the
-    # waiting list so the operator still sees it.
-    assert by_bmn["in-transit-xid"].actionable is False
-    assert by_bmn["in-transit-xid"].cwnc_state == "draining"
-    # JIRA is queried for every target now (cwnc_state isn't a gate).
-    assert len(jira_search_calls) == len(targets)
-    # phase fetch runs only for BMNs that survive the description filter.
-    assert sorted(fetch_phase_calls) == ["in-transit-xid", "triage-xid"]
+    assert by_bmn["flcc-xid"].actionable is False
+    assert by_bmn["draining-xid"].actionable is False
+    # prod-xid never reached JIRA — the CWNC-production filter short-circuited it.
+    assert all("prod-xid" not in ids for ids in jira_search_calls)
+    # phase fetch only runs for the BMNs that survive the description filter.
+    assert sorted(fetch_phase_calls) == ["draining-xid", "flcc-xid", "triage-xid"]
 
 
 def test_collect_marks_triage_with_non_nlcc_phase_as_waiting() -> None:

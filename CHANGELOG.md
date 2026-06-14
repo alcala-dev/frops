@@ -8,6 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- XID-109 lists were leaking nodes whose `CWNC-STATE=production`. The
+  prior fix removed the CWNC-STATE gate entirely so nodes still
+  propagating through eviction would surface — but that also let
+  through nodes that FLCC has moved out of production while NLCC's
+  view still lags at `production`. The operator wants to act only
+  after NLCC also agrees the node has left production.
+  New `CWNC_EXCLUDED_STATES = {"production"}` constant; nodes whose
+  CWNC-STATE matches are skipped before the JIRA search runs.
+  Everything else (flcc / triage / draining / evict-to-triage /
+  return-to-fleet / return-to-triage workflows) continues to surface.
+
+### Fixed
 - XID-109 discovery was silently dropping nodes that should have
   appeared in the actionable / waiting tables:
     1. **HO search status filter was too narrow.** The pipeline used

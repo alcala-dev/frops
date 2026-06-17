@@ -8,6 +8,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- `awxstat` calls from `view sku --action` were failing with exit 1
+  every time even when `AWX_USERNAME` / `AWX_PASSWORD` were already
+  exported in env. Root cause: upstream `awxstat` (in cw-fleet-tools)
+  unconditionally calls `source_passkeys` at startup, which tries
+  Doppler first then 1Password. Doppler returning `Forbidden` (stale
+  CLI token) plus 1Password CLI being unable to fire its biometric
+  prompt from a non-TTY subprocess both fail → `source_passkeys`
+  exits 1 → `awxstat` exits 1, dropping all CW error codes for the
+  affected BMNs.
+  Workaround in frops (no upstream awxstat change required): new
+  bundled `src/frops/scripts/awxstat_envbypass.zsh` shim that sources
+  awxstat with its trailing `main "$@"` stripped, overrides
+  `source_passkeys` to a no-op, then invokes `main` itself with the
+  caller's args. The new `frops.awx_invoker.awxstat_command` builder
+  routes through the shim when both env vars are set; otherwise it
+  falls through to the real `awxstat` so first-run users still get
+  the standard credential-setup guidance.
+
+### Fixed
 - XID-109 lists were leaking nodes whose `CWNC-STATE=production`. The
   prior fix removed the CWNC-STATE gate entirely so nodes still
   propagating through eviction would surface — but that also let

@@ -29,6 +29,7 @@ from frops.action import (
     resolve_ho_tickets,
 )
 from frops.awx import AWXReport, parse_awxstat
+from frops.awx_invoker import awxstat_command
 from frops.catalog import (
     ANALYZE_COMMANDS,
     FAIL_COMMANDS,
@@ -1048,12 +1049,20 @@ def _build_targets(
 def _collect_awx_reports(bmn: str) -> list[AWXReport]:
     """Run awxstat -l mgmt|bmc against a BMN and parse the output.
 
-    Failures (awxstat unavailable, non-zero exit) are logged to stderr and
-    the limit type is skipped. Phase A continues with whatever it got.
+    Routes through `frops.awx_invoker.awxstat_command`, which picks
+    the bundled `awxstat_envbypass.zsh` shim when AWX_USERNAME and
+    AWX_PASSWORD are already exported. The shim short-circuits
+    awxstat's `source_passkeys` (Doppler → 1Password) so a stale
+    Doppler token or unreachable 1Password CLI doesn't kill the call
+    when the env vars in place would have worked.
+
+    Failures (awxstat unavailable, non-zero exit) are logged to stderr
+    and the limit type is skipped. Phase A continues with whatever it
+    got.
     """
     reports: list[AWXReport] = []
     for limit_type in ("mgmt", "bmc"):
-        text, rc = capture_command(f"awxstat -l {limit_type} {bmn}")
+        text, rc = capture_command(awxstat_command(limit_type, bmn))
         if rc != 0:
             print(
                 f"warning: awxstat -l {limit_type} {bmn} failed (exit {rc}); skipping this limit",

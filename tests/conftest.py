@@ -9,6 +9,11 @@ autouse fixture.
 `FROPS_STATE_DIR` is also redirected to a per-test tmp dir so CW0912
 state file reads don't leak between tests (or pick up stale state
 from a developer's `~/.cache/frops/cw0912/` directory).
+
+`AWX_USERNAME` / `AWX_PASSWORD` are also cleared by default so the
+awxstat invocation builder consistently picks the `awxstat …` literal
+form across local + CI runs. Tests that need to exercise the
+env-bypass shim path re-set the vars locally.
 """
 
 from __future__ import annotations
@@ -43,3 +48,18 @@ def _isolate_cw0912_state_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
     takes precedence over this default.
     """
     monkeypatch.setenv("FROPS_STATE_DIR", str(tmp_path / "frops-cw0912"))
+
+
+@pytest.fixture(autouse=True)
+def _isolate_awx_env_creds(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Clear AWX_USERNAME / AWX_PASSWORD by default.
+
+    `frops.awx_invoker.awxstat_command` switches to the envbypass shim
+    when both vars are present in env. A developer running tests with
+    those vars exported (the common case once frops is set up) would
+    otherwise see the integration tests' `cmd.startswith("awxstat")`
+    fixtures miss the awxstat dispatch and report rc=1 for unrelated
+    reasons. Tests that exercise the shim path re-set the vars locally.
+    """
+    monkeypatch.delenv("AWX_USERNAME", raising=False)
+    monkeypatch.delenv("AWX_PASSWORD", raising=False)

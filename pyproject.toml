@@ -46,9 +46,9 @@ path = "src/frops/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/frops"]
-# Non-Python files under src/frops/scripts/ (e.g. awxstat_envbypass.zsh)
-# ship with the wheel so frops.awx_invoker can resolve them at runtime.
-force-include = { "src/frops/scripts" = "frops/scripts" }
+# Non-Python files under src/frops/ (e.g. scripts/awxstat_envbypass.zsh)
+# are included by default since hatch ships every file under each
+# `packages` directory. No explicit data-files config needed.
 
 [tool.ruff]
 line-length = 100
